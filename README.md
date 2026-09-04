@@ -1,6 +1,6 @@
 # Server Reset On Any Player Death
 
-A dedicated-server-only Fabric mod for Minecraft 26.1.2. Deaths are counted
+A dedicated-server-only Fabric mod. Deaths are counted
 server-wide. When the configured allowance is reached, every other online player
 is killed, the triggering player's death message is repeated in quotes, and the
 server stops after a configurable delay. The supplied watchdog deletes the old
@@ -8,28 +8,9 @@ world and starts the server again.
 
 ## Install
 
-1. Install Fabric Loader 0.18.4 or newer for a Minecraft 26.1.2 dedicated server.
-2. Put the built mod JAR and Fabric API 0.155.0+26.1.2 in the server's `mods` folder.
-3. Put `start-server.ps1` (Windows) or `start-server.sh` (Linux) beside
-   `server.properties` and start the server through that script. Do not start the
-   server JAR directly, because a stopped Java process cannot restart itself.
-4. Put persistent datapacks in `reset-datapacks` beside the launcher. Its contents
-   are copied into the world's `datapacks` folder before every server start.
-5. On first launch, edit `config/server_reset_hardcore.json`, then restart once
-   to apply changes.
-
-Windows example:
-
-```powershell
-.\start-server.ps1 -ServerJar fabric-server-launch.jar -JvmArgs "-Xms2G -Xmx4G"
-```
-
-Linux example:
-
-```bash
-chmod +x start-server.sh
-SERVER_JAR=fabric-server-launch.jar JAVA_ARGS="-Xms2G -Xmx4G" ./start-server.sh
-```
+- Configuration is stored in `config/server_reset_hardcore.json`.
+- Persistent datapacks belong in `persistent-datapacks`; the mod copies them into
+  every newly generated world.
 
 ## Configuration
 
@@ -53,15 +34,20 @@ When `requireConsoleConfirmation` is true, the wipe still kills all online
 players, but shutdown pauses until an administrator types `confirmreset` in the
 server console. For safety, that command is rejected when entered by a player.
 
-The watchdog only deletes a direct child directory of the server directory and
-only after the mod writes a valid reset marker during an intentional reset.
+The mod only deletes a direct child directory of the server directory and only
+after writing a valid reset marker during an intentional reset.
 
-## Build
+## Restart-loop example
 
-Requires Java 25:
+A stopped Java process cannot start itself. If your server host does not already
+restart stopped servers automatically, a minimal Windows batch loop is enough:
 
-```text
-./gradlew build
+```bat
+@echo off
+:restart
+java -jar fabric-server-launch.jar nogui
+goto restart
 ```
 
-The distributable JAR is created under `build/libs/` (not the `-sources` JAR).
+The batch loop only starts Java again. World deletion and datapack copying are
+performed by the mod before the world loads.

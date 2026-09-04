@@ -1,6 +1,7 @@
 package com.cooper.serverresethardcore;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.mojang.brigadier.Command;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -18,16 +19,22 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 public final class ServerResetHardcore implements ModInitializer {
     public static final String MOD_ID = "server_reset_hardcore";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve(MOD_ID + ".json");
-    private static final Path RESET_MARKER = FabricLoader.getInstance().getGameDir().resolve("server-reset-request.json");
+    private static final Path GAME_DIR = FabricLoader.getInstance().getGameDir().toAbsolutePath().normalize();
+    private static final Path RESET_MARKER = GAME_DIR.resolve("server-reset-request.json");
+    private static final Path PERSISTENT_DATAPACKS = GAME_DIR.resolve("persistent-datapacks");
     private static final Set<UUID> QUOTED_DEATH_PLAYERS = new HashSet<>();
 
     private static HardcoreConfig config;
@@ -38,13 +45,12 @@ public final class ServerResetHardcore implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        prepareWorldBeforeStartup();
         config = HardcoreConfig.load(CONFIG_PATH, LOGGER);
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             resetInProgress = false;
             pendingConsoleConfirmation = false;
             shutdownAtTick = Long.MAX_VALUE;
-            try { Files.deleteIfExists(RESET_MARKER); }
-            catch (IOException e) { LOGGER.warn("Could not clear stale reset marker", e); }
         });
         ServerTickEvents.END_SERVER_TICK.register(ServerResetHardcore::tick);
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
@@ -127,6 +133,71 @@ public final class ServerResetHardcore implements ModInitializer {
             Files.writeString(RESET_MARKER, marker.toString());
         } catch (IOException e) {
             LOGGER.error("Could not create reset marker; watchdog will not delete the world", e);
+        }
+    }
+
+    private static void prepareWorldBeforeStartup() {
+        try {
+            Files.createDirectories(PERSISTENT_DATAPACKS);
+            Path worldPath = resolveWorldPath();
+
+            if (Files.exists(RESET_MARKER)) {
+                JsonObject marker = JsonParser.parseString(Files.readString(RESET_MARKER)).getAsJsonObject();
+                if (!MOD_ID.equals(marker.get("requestedBy").getAsString())) {
+                    throw new IOException("Reset marker was not created by this mod");
+                }
+                deleteTree(worldPath);
+                Files.delete(RESET_MARKER);
+                LOGGER.warn("Deleted old world before startup");
+            }
+
+            copyPersistentDatapacks(worldPath.resolve("datapacks"));
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not prepare the world safely; startup has been stopped", e);
+        }
+    }
+
+    private static Path resolveWorldPath() throws IOException {
+        Properties properties = new Properties();
+        Path propertiesPath = GAME_DIR.resolve("server.properties");
+        if (Files.exists(propertiesPath)) {
+            try (var reader = Files.newBufferedReader(propertiesPath)) {
+                properties.load(reader);
+            }
+        }
+        String levelName = properties.getProperty("level-name", "world").trim();
+        if (levelName.isEmpty() || levelName.contains("..") || levelName.contains("/") || levelName.contains("\\")) {
+            throw new IOException("Unsafe level-name: " + levelName);
+        }
+        Path worldPath = GAME_DIR.resolve(levelName).normalize();
+        if (!worldPath.getParent().equals(GAME_DIR)) {
+            throw new IOException("World folder must be directly inside the server folder");
+        }
+        return worldPath;
+    }
+
+    private static void deleteTree(Path root) throws IOException {
+        if (!Files.exists(root)) return;
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
+        }
+    }
+
+    private static void copyPersistentDatapacks(Path destination) throws IOException {
+        Files.createDirectories(destination);
+        try (Stream<Path> paths = Files.walk(PERSISTENT_DATAPACKS)) {
+            for (Path source : paths.toList()) {
+                if (source.equals(PERSISTENT_DATAPACKS)) continue;
+                Path target = destination.resolve(PERSISTENT_DATAPACKS.relativize(source)).normalize();
+                if (!target.startsWith(destination)) throw new IOException("Datapack path escaped destination");
+                if (Files.isDirectory(source)) Files.createDirectories(target);
+                else {
+                    Files.createDirectories(target.getParent());
+                    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
         }
     }
 
