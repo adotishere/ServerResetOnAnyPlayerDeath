@@ -11,7 +11,6 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -60,7 +59,7 @@ public final class ServerResetHardcore implements ModInitializer {
             confirmationPromptAtTick = Long.MAX_VALUE;
             rotateAtTick = Long.MAX_VALUE;
             try {
-                RotatingWorldManager.ensureWorld(server, currentWorldNumber(), config.activeWorldSeed);
+                RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(), config.activeWorldSeed);
             } catch (RuntimeException e) {
                 LOGGER.error("Could not load the active gameplay world", e);
             }
@@ -167,10 +166,9 @@ public final class ServerResetHardcore implements ModInitializer {
         int oldNumber = currentWorldNumber();
         int newNumber = oldNumber + 1;
         long newSeed = newWorldSeed();
-        ResourceKey<Level> oldKey = RotatingWorldManager.keyFor(oldNumber);
         final ServerLevel newWorld;
         try {
-            newWorld = RotatingWorldManager.ensureWorld(server, newNumber, newSeed);
+            newWorld = RotatingWorldManager.ensureWorldSet(server, newNumber, newSeed);
         } catch (RuntimeException e) {
             resetInProgress = false;
             LOGGER.error("Could not create the replacement world; the old world was kept", e);
@@ -188,7 +186,7 @@ public final class ServerResetHardcore implements ModInitializer {
                 config.activeWorldSeed = newSeed;
                 config.save(CONFIG_PATH, LOGGER);
                 updateServerPropertiesMotd();
-                RotatingWorldManager.deleteWorld(server, oldKey, resolveWorldPath());
+                RotatingWorldManager.deleteWorldSet(server, oldNumber, resolveWorldPath());
                 LOGGER.warn("Completed live world reset #{}; old gameplay dimension deleted", config.resetCount);
                 server.getPlayerList().broadcastSystemMessage(Component.literal("The fresh world is ready."), false);
             } catch (Exception e) {

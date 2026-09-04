@@ -4,12 +4,15 @@ A dedicated-server-only Fabric mod that turns the whole server into a shared
 hardcore run. When the configured death allowance is reached, the original
 death message is announced in quotes without showing a death screen. After the
 configured delay, every online player's gameplay data is cleared and everyone
-is moved into a newly generated Overworld-style dimension. The previous
-gameplay dimension is then unloaded and deleted without restarting the server.
+is moved into a newly generated world set containing an Overworld, Nether, and
+End. The previous three gameplay dimensions are then unloaded and deleted
+without restarting the server.
 
 The vanilla Overworld remains as an internal fallback while gameplay takes place
-in rotating worlds named `server_reset_hardcore:reset_1`, `reset_2`, and so on.
-Players are automatically sent to the active gameplay world when they join.
+in rotating world sets such as `server_reset_hardcore:reset_1`,
+`server_reset_hardcore:reset_1_nether`, and
+`server_reset_hardcore:reset_1_end`. Nether and End portals remain inside the
+active set. Players are automatically sent to its Overworld when they join.
 
 ## Install
 
