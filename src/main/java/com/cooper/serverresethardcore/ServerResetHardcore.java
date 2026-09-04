@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import com.mojang.brigadier.Command;
+import com.mojang.brigadier.CommandDispatcher;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
@@ -13,6 +14,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.CommandSourceStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +44,7 @@ public final class ServerResetHardcore implements ModInitializer {
     private static HardcoreConfig config;
     private static boolean resetInProgress;
     private static boolean pendingConsoleConfirmation;
+    private static long confirmationPromptAtTick = Long.MAX_VALUE;
     private static Component triggeringDeathMessage;
     private static long shutdownAtTick = Long.MAX_VALUE;
 
@@ -53,23 +56,16 @@ public final class ServerResetHardcore implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             resetInProgress = false;
             pendingConsoleConfirmation = false;
+            confirmationPromptAtTick = Long.MAX_VALUE;
             shutdownAtTick = Long.MAX_VALUE;
         });
         ServerTickEvents.END_SERVER_TICK.register(ServerResetHardcore::tick);
-        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
-                dispatcher.register(Commands.literal("confirmreset").executes(context -> {
-                    if (context.getSource().getEntity() != null) {
-                        context.getSource().sendFailure(Component.literal("This reset can only be confirmed from the server console."));
-                        return 0;
-                    }
-                    if (!pendingConsoleConfirmation) {
-                        context.getSource().sendFailure(Component.literal("There is no reset waiting for confirmation."));
-                        return 0;
-                    }
-                    beginShutdown(context.getSource().getServer());
-                    context.getSource().sendSuccess(() -> Component.literal("World reset confirmed."), true);
-                    return Command.SINGLE_SUCCESS;
-                })));
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            registerConfirmationCommand(dispatcher, "y", true);
+            registerConfirmationCommand(dispatcher, "Y", true);
+            registerConfirmationCommand(dispatcher, "n", false);
+            registerConfirmationCommand(dispatcher, "N", false);
+        });
         LOGGER.info("Server Reset Hardcore loaded (allowed deaths: {})", config.allowedDeaths);
     }
 
@@ -98,16 +94,41 @@ public final class ServerResetHardcore implements ModInitializer {
         config.save(CONFIG_PATH, LOGGER);
         if (config.requireConsoleConfirmation) {
             pendingConsoleConfirmation = true;
-            LOGGER.warn("Death limit reached. Type 'confirmreset' in the SERVER CONSOLE to approve the world reset.");
-            server.getPlayerList().broadcastSystemMessage(
-                    Component.literal("World reset is waiting for server-console confirmation."), false);
+            confirmationPromptAtTick = server.getTickCount() + 1L;
         } else {
             beginShutdown(server);
         }
     }
 
+    private static void registerConfirmationCommand(
+            CommandDispatcher<CommandSourceStack> dispatcher, String name, boolean approve) {
+        dispatcher.register(Commands.literal(name).executes(context -> {
+            CommandSourceStack source = context.getSource();
+            if (source.getEntity() != null) {
+                source.sendFailure(Component.literal("This response can only be entered in the server console."));
+                return 0;
+            }
+            if (!pendingConsoleConfirmation) {
+                source.sendFailure(Component.literal("There is no reset waiting for confirmation."));
+                return 0;
+            }
+            if (approve) {
+                beginShutdown(source.getServer());
+                source.sendSuccess(() -> Component.literal("World reset confirmed."), false);
+            } else {
+                pendingConsoleConfirmation = false;
+                confirmationPromptAtTick = Long.MAX_VALUE;
+                resetInProgress = false;
+                triggeringDeathMessage = null;
+                source.sendSuccess(() -> Component.literal("World reset cancelled."), false);
+            }
+            return Command.SINGLE_SUCCESS;
+        }));
+    }
+
     private static void beginShutdown(MinecraftServer server) {
         pendingConsoleConfirmation = false;
+        confirmationPromptAtTick = Long.MAX_VALUE;
         config.resetCount++;
         config.save(CONFIG_PATH, LOGGER);
         updateServerPropertiesMotd();
@@ -122,6 +143,10 @@ public final class ServerResetHardcore implements ModInitializer {
     }
 
     private static void tick(MinecraftServer server) {
+        if (pendingConsoleConfirmation && server.getTickCount() >= confirmationPromptAtTick) {
+            confirmationPromptAtTick = Long.MAX_VALUE;
+            LOGGER.warn("Reset the world? [Y/n]");
+        }
         if (!resetInProgress || server.getTickCount() < shutdownAtTick) return;
         shutdownAtTick = Long.MAX_VALUE;
         writeResetMarker(server);
