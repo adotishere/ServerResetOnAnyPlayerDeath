@@ -30,8 +30,9 @@ world and starts the server again.
 already counted toward `allowedDeaths`, including across normal server restarts.
 It returns to `0` when a world reset is triggered.
 
-With tracking enabled, the displayed MOTD is `Reset #1 : 'A new world awaits'`.
-The number shown is the current world's number. With tracking disabled, the
+With tracking enabled, the displayed MOTD uses two formatted lines: a bold gold
+`Reset #1` heading followed by the configured MOTD text in gray. The number shown
+is the current world's number. With tracking disabled, the
 original `motd` value in `server.properties` is restored. The mod updates the
 `motd=` property directly and keeps its backup outside the world folder.
 

@@ -224,7 +224,7 @@ public final class ServerResetHardcore implements ModInitializer {
             String desiredMotd;
             if (config.trackResets) {
                 if (!Files.exists(MOTD_BACKUP)) Files.writeString(MOTD_BACKUP, currentMotd);
-                desiredMotd = "Reset #" + (config.resetCount + 1) + " : '" + config.motdText + "'";
+                desiredMotd = "§6§lReset #" + (config.resetCount + 1) + "§r\\n§7" + config.motdText;
             } else {
                 if (!Files.exists(MOTD_BACKUP)) return;
                 desiredMotd = Files.readString(MOTD_BACKUP);
