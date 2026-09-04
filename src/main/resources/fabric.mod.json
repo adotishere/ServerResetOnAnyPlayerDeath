@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "server_reset_hardcore",
   "version": "${version}",
-  "name": "adotishere",
+  "name": "Server Reset On Any Player Death",
   "description": "Server-wide hardcore: one fatal death can wipe everyone, reset the world, and restart the server.",
   "authors": ["cooper"],
   "license": "MIT",

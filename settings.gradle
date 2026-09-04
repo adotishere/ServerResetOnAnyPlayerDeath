@@ -6,4 +6,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'adotishere'
+rootProject.name = 'ServerResetOnAnyPlayerDeath'

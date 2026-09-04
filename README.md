@@ -1,4 +1,4 @@
-# adotishere
+# Server Reset On Any Player Death
 
 A dedicated-server-only Fabric mod for Minecraft 26.1.2. Deaths are counted
 server-wide. When the configured allowance is reached, every other online player
