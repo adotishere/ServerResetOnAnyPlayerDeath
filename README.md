@@ -38,7 +38,8 @@ original `motd` value in `server.properties` is restored. The mod updates the
 
 When `requireConsoleConfirmation` is true, the wipe still kills all online
 players, then the server console displays `Reset the world? [Y/n]`. Enter `Y`
-to continue or `N` to cancel. Player-entered responses are rejected.
+or press Enter to continue; enter `N` to cancel. Player-entered responses are
+rejected.
 
 The mod only deletes a direct child directory of the server directory and only
 after writing a valid reset marker during an intentional reset.
