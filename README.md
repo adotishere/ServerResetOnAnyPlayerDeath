@@ -1,60 +1,60 @@
 # Server Reset On Any Player Death
 
-A dedicated-server-only Fabric mod. Deaths are counted
-server-wide. When the configured allowance is reached, every other online player
-is killed, the triggering player's death message is repeated in quotes, and the
-server stops after a configurable delay. The supplied watchdog deletes the old
-world and starts the server again.
+A dedicated-server-only Fabric mod that turns the whole server into a shared
+hardcore run. When the configured death allowance is reached, the original
+death message is announced in quotes without showing a death screen. After the
+configured delay, every online player's gameplay data is cleared and everyone
+is moved into a newly generated Overworld-style dimension. The previous
+gameplay dimension is then unloaded and deleted without restarting the server.
+
+The vanilla Overworld remains as an internal fallback while gameplay takes place
+in rotating worlds named `server_reset_hardcore:reset_1`, `reset_2`, and so on.
+Players are automatically sent to the active gameplay world when they join.
 
 ## Install
 
 - Configuration is stored in `config/server_reset_hardcore.json`.
 - The mod creates `persistent-datapacks` beside the server files on first start.
-  Datapacks placed there are copied into every newly generated world.
+  Datapacks placed there are copied into the main world's datapack folder before
+  startup so they are available to every generated gameplay world.
 
 ## Configuration
 
 ```json
 {
   "allowedDeaths": 1,
-  "shutdownDelaySeconds": 5,
+  "resetDelaySeconds": 5,
   "trackResets": true,
   "requireConsoleConfirmation": false,
   "motdText": "A new world awaits",
   "resetCount": 0,
-  "deathsSinceLastReset": 0
+  "deathsSinceLastReset": 0,
+  "activeWorldSeed": 123456789
 }
 ```
 
-`deathsSinceLastReset` is managed by the mod. It stores how many deaths have
-already counted toward `allowedDeaths`, including across normal server restarts.
-It returns to `0` when a world reset is triggered.
+`allowedDeaths`, `resetDelaySeconds`, `trackResets`,
+`requireConsoleConfirmation`, and `motdText` are intended for server owners to
+edit. The remaining values are maintained by the mod so progress survives a
+normal server restart. Existing v1 configs are migrated from
+`shutdownDelaySeconds` to `resetDelaySeconds` automatically.
 
-With tracking enabled, the displayed MOTD uses two formatted lines: a bold gold
-`Reset #1` heading followed by the configured MOTD text in gray. The number shown
-is the current world's number. With tracking disabled, the
-original `motd` value in `server.properties` is restored. The mod updates the
-`motd=` property directly and keeps its backup outside the world folder.
+With reset tracking enabled, the MOTD is a two-line gold-and-gray message with
+the active world number. With tracking disabled, the original `motd` value in
+`server.properties` is restored.
 
-When `requireConsoleConfirmation` is true, the wipe still kills all online
-players, then the server console displays `Reset the world? [Y/n]`. Enter `Y`
-or press Enter to continue; enter `N` to cancel. Player-entered responses are
+When console confirmation is enabled, the console displays
+`Reset the world? [Y/n]` after the triggering death message. Enter `Y` or press
+Enter to continue; enter `N` to cancel. Responses entered by players are
 rejected.
 
-The mod only deletes a direct child directory of the server directory and only
-after writing a valid reset marker during an intentional reset.
+## Simple launch example
 
-## Restart-loop example
-
-A stopped Java process cannot start itself. If your server host does not already
-restart stopped servers automatically, a minimal Windows batch loop is enough:
+No restart loop is needed for world resets. A normal server batch file is
+enough:
 
 ```bat
 @echo off
-:restart
 java -jar fabric-server-launch.jar nogui
-goto restart
+pause
 ```
-
-The batch loop only starts Java again. World deletion and datapack copying are
-performed by the mod before the world loads.

@@ -3,7 +3,7 @@
   "id": "server_reset_hardcore",
   "version": "${version}",
   "name": "Server Reset On Any Player Death",
-  "description": "Server-wide hardcore: one fatal death can wipe everyone, reset the world, and restart the server.",
+  "description": "Server-wide hardcore with live, restartless world rotation after the death limit is reached.",
   "authors": ["cooper"],
   "license": "MIT",
   "environment": "server",

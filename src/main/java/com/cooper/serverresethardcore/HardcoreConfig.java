@@ -2,6 +2,8 @@ package com.cooper.serverresethardcore;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -15,12 +17,13 @@ public final class HardcoreConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     public int allowedDeaths = 1;
-    public int shutdownDelaySeconds = 5;
+    public int resetDelaySeconds = 5;
     public boolean trackResets = true;
     public boolean requireConsoleConfirmation = false;
     public String motdText = "A new world awaits";
     public int resetCount = 0;
     public int deathsSinceLastReset = 0;
+    public long activeWorldSeed = 0L;
 
     static HardcoreConfig load(Path path, Logger logger) {
         try {
@@ -31,8 +34,12 @@ public final class HardcoreConfig {
                 return config;
             }
             try (Reader reader = Files.newBufferedReader(path)) {
-                HardcoreConfig config = GSON.fromJson(reader, HardcoreConfig.class);
+                JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+                HardcoreConfig config = GSON.fromJson(json, HardcoreConfig.class);
                 if (config == null) config = new HardcoreConfig();
+                if (!json.has("resetDelaySeconds") && json.has("shutdownDelaySeconds")) {
+                    config.resetDelaySeconds = json.get("shutdownDelaySeconds").getAsInt();
+                }
                 config.sanitize();
                 config.save(path, logger);
                 return config;
@@ -65,7 +72,7 @@ public final class HardcoreConfig {
 
     private void sanitize() {
         allowedDeaths = Math.max(1, allowedDeaths);
-        shutdownDelaySeconds = Math.max(0, shutdownDelaySeconds);
+        resetDelaySeconds = Math.max(0, resetDelaySeconds);
         resetCount = Math.max(0, resetCount);
         deathsSinceLastReset = Math.max(0, deathsSinceLastReset);
         if (motdText == null) motdText = "";
