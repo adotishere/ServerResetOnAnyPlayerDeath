@@ -126,6 +126,13 @@ public final class ServerResetHardcore implements ModInitializer {
         }));
     }
 
+    public static boolean handleEmptyConsoleConfirmation(String input, CommandSourceStack source) {
+        if (!pendingConsoleConfirmation || !input.isBlank()) return false;
+        beginShutdown(source.getServer());
+        source.sendSuccess(() -> Component.literal("World reset confirmed."), false);
+        return true;
+    }
+
     private static void beginShutdown(MinecraftServer server) {
         pendingConsoleConfirmation = false;
         confirmationPromptAtTick = Long.MAX_VALUE;
