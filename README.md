@@ -9,8 +9,8 @@ world and starts the server again.
 ## Install
 
 - Configuration is stored in `config/server_reset_hardcore.json`.
-- Persistent datapacks belong in `persistent-datapacks`; the mod copies them into
-  every newly generated world.
+- The mod creates `persistent-datapacks` beside the server files on first start.
+  Datapacks placed there are copied into every newly generated world.
 
 ## Configuration
 
