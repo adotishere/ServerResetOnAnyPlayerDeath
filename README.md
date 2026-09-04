@@ -26,9 +26,14 @@ world and starts the server again.
 }
 ```
 
+`deathsSinceLastReset` is managed by the mod. It stores how many deaths have
+already counted toward `allowedDeaths`, including across normal server restarts.
+It returns to `0` when a world reset is triggered.
+
 With tracking enabled, the displayed MOTD is `Reset #1 : 'A new world awaits'`.
 The number shown is the current world's number. With tracking disabled, the
-normal `motd` value from `server.properties` is used unchanged.
+original `motd` value in `server.properties` is restored. The mod updates the
+`motd=` property directly and keeps its backup outside the world folder.
 
 When `requireConsoleConfirmation` is true, the wipe still kills all online
 players, but shutdown pauses until an administrator types `confirmreset` in the

@@ -23,6 +23,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
@@ -35,6 +36,7 @@ public final class ServerResetHardcore implements ModInitializer {
     private static final Path GAME_DIR = FabricLoader.getInstance().getGameDir().toAbsolutePath().normalize();
     private static final Path RESET_MARKER = GAME_DIR.resolve("server-reset-request.json");
     private static final Path PERSISTENT_DATAPACKS = GAME_DIR.resolve("persistent-datapacks");
+    private static final Path MOTD_BACKUP = GAME_DIR.resolve("server-reset-hardcore-motd-backup.txt");
     private static final Set<UUID> QUOTED_DEATH_PLAYERS = new HashSet<>();
 
     private static HardcoreConfig config;
@@ -47,6 +49,7 @@ public final class ServerResetHardcore implements ModInitializer {
     public void onInitialize() {
         prepareWorldBeforeStartup();
         config = HardcoreConfig.load(CONFIG_PATH, LOGGER);
+        updateServerPropertiesMotd();
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             resetInProgress = false;
             pendingConsoleConfirmation = false;
@@ -107,6 +110,7 @@ public final class ServerResetHardcore implements ModInitializer {
         pendingConsoleConfirmation = false;
         config.resetCount++;
         config.save(CONFIG_PATH, LOGGER);
+        updateServerPropertiesMotd();
         shutdownAtTick = server.getTickCount() + (long) config.shutdownDelaySeconds * 20L;
         server.getPlayerList().broadcastSystemMessage(
                 Component.literal("World reset in " + config.shutdownDelaySeconds + " second(s)."), false);
@@ -201,8 +205,38 @@ public final class ServerResetHardcore implements ModInitializer {
         }
     }
 
-    public static String decorateMotd(String normalMotd) {
-        if (config == null || !config.trackResets) return normalMotd;
-        return "Reset #" + (config.resetCount + 1) + " : '" + config.motdText + "'";
+    private static void updateServerPropertiesMotd() {
+        Path propertiesPath = GAME_DIR.resolve("server.properties");
+        try {
+            List<String> lines = Files.exists(propertiesPath)
+                    ? new ArrayList<>(Files.readAllLines(propertiesPath))
+                    : new ArrayList<>();
+            int motdLine = -1;
+            String currentMotd = "A Minecraft Server";
+            for (int i = 0; i < lines.size(); i++) {
+                if (lines.get(i).startsWith("motd=")) {
+                    motdLine = i;
+                    currentMotd = lines.get(i).substring("motd=".length());
+                    break;
+                }
+            }
+
+            String desiredMotd;
+            if (config.trackResets) {
+                if (!Files.exists(MOTD_BACKUP)) Files.writeString(MOTD_BACKUP, currentMotd);
+                desiredMotd = "Reset #" + (config.resetCount + 1) + " : '" + config.motdText + "'";
+            } else {
+                if (!Files.exists(MOTD_BACKUP)) return;
+                desiredMotd = Files.readString(MOTD_BACKUP);
+            }
+
+            String replacement = "motd=" + desiredMotd;
+            if (motdLine >= 0) lines.set(motdLine, replacement);
+            else lines.add(replacement);
+            Files.write(propertiesPath, lines);
+            if (!config.trackResets) Files.deleteIfExists(MOTD_BACKUP);
+        } catch (IOException e) {
+            LOGGER.error("Could not update motd in server.properties", e);
+        }
     }
 }
