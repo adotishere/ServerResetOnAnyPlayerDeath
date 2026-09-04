@@ -1,0 +1,7 @@
+{
+  "required": true,
+  "package": "com.cooper.serverresethardcore.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": ["MinecraftServerMixin", "ServerPlayerMixin"],
+  "injectors": { "defaultRequire": 1 }
+}
