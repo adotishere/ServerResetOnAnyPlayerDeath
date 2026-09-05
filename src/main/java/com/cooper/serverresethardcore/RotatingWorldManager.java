@@ -7,6 +7,7 @@ import net.minecraft.core.HolderGetter;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.Identifier;
+import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.PlayerSpawnFinder;
 import net.minecraft.server.level.ServerLevel;
@@ -184,6 +185,23 @@ public final class RotatingWorldManager {
             }
         } catch (Exception e) {
             ServerResetHardcore.LOGGER.error("Failed to reset world time to 0", e);
+        }
+    }
+
+    public static void clearWeather(MinecraftServer server) {
+        try {
+            int clearDuration = ServerLevel.RAIN_DELAY.sample(server.overworld().getRandom());
+            server.setWeatherParameters(clearDuration, 0, false, false);
+            for (ServerLevel level : server.getAllLevels()) {
+                level.resetWeatherCycle();
+            }
+            if (server.getPlayerList() != null) {
+                server.getPlayerList().broadcastAll(new ClientboundGameEventPacket(ClientboundGameEventPacket.STOP_RAINING, 0.0F));
+                server.getPlayerList().broadcastAll(new ClientboundGameEventPacket(ClientboundGameEventPacket.RAIN_LEVEL_CHANGE, 0.0F));
+                server.getPlayerList().broadcastAll(new ClientboundGameEventPacket(ClientboundGameEventPacket.THUNDER_LEVEL_CHANGE, 0.0F));
+            }
+        } catch (Exception e) {
+            ServerResetHardcore.LOGGER.error("Failed to clear weather on reset", e);
         }
     }
 

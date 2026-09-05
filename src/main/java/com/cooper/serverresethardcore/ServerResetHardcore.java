@@ -224,6 +224,7 @@ public final class ServerResetHardcore implements ModInitializer {
                 RotatingWorldManager.teleport(player, newWorld, spawn);
             }
             RotatingWorldManager.resetWorldTime(server);
+            RotatingWorldManager.clearWeather(server);
             long newNetherSeed = uniqueSeed(config.nextOverworldSeed);
             long newEndSeed = uniqueSeed(config.nextOverworldSeed, newNetherSeed);
             config.resetCount++;
