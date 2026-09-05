@@ -15,6 +15,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,8 +26,10 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 
 public final class ServerResetHardcore implements ModInitializer {
@@ -41,27 +44,38 @@ public final class ServerResetHardcore implements ModInitializer {
     private static boolean resetInProgress;
     private static boolean pendingConsoleConfirmation;
     private static long confirmationPromptAtTick = Long.MAX_VALUE;
-    private static long rotateAtTick = Long.MAX_VALUE;
+    private static long cleanupAtTick = Long.MAX_VALUE;
+    private static int cleanupWorldNumber = -1;
+    private static CompletableFuture<Vec3> standbySpawn;
+    private static volatile Vec3 activeSpawnPos;
+    private static volatile Vec3 standbySpawnPos;
     private static Component triggeringDeathMessage;
+    private static final Set<Long> USED_SEEDS = ConcurrentHashMap.newKeySet();
 
     @Override
     public void onInitialize() {
         preparePersistentDatapacks();
         config = HardcoreConfig.load(CONFIG_PATH, LOGGER);
-        if (config.activeWorldSeed == 0L) {
-            config.activeWorldSeed = newWorldSeed();
-            config.save(CONFIG_PATH, LOGGER);
-        }
+        ensureUniqueSeeds(null);
         updateServerPropertiesMotd();
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             resetInProgress = false;
             pendingConsoleConfirmation = false;
             confirmationPromptAtTick = Long.MAX_VALUE;
-            rotateAtTick = Long.MAX_VALUE;
+            cleanupAtTick = Long.MAX_VALUE;
+            cleanupWorldNumber = -1;
+            USED_SEEDS.add(server.getWorldGenSettings().options().seed());
             try {
-                RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(), config.activeWorldSeed);
+                ServerLevel active = RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(),
+                        config.activeOverworldSeed, config.activeNetherSeed, config.activeEndSeed);
+                RotatingWorldManager.findSpawn(active).thenAccept(pos -> activeSpawnPos = pos);
+                ServerLevel standby = RotatingWorldManager.ensureOverworld(
+                        server, currentWorldNumber() + 1, config.nextOverworldSeed);
+                standbySpawnPos = null;
+                standbySpawn = RotatingWorldManager.findSpawn(standby);
+                standbySpawn.thenAccept(pos -> standbySpawnPos = pos);
             } catch (RuntimeException e) {
-                LOGGER.error("Could not load the active gameplay world", e);
+                LOGGER.error("Could not load the active or standby gameplay world", e);
             }
         });
         ServerTickEvents.END_SERVER_TICK.register(ServerResetHardcore::tick);
@@ -72,7 +86,7 @@ public final class ServerResetHardcore implements ModInitializer {
             registerConfirmationCommand(dispatcher, "n", false);
             registerConfirmationCommand(dispatcher, "N", false);
         });
-        LOGGER.info("Server Reset Hardcore v2 loaded (allowed deaths: {})", config.allowedDeaths);
+        LOGGER.info("Server Reset Hardcore v2 loaded");
     }
 
     /** Returns true when vanilla death handling must be cancelled. */
@@ -80,13 +94,6 @@ public final class ServerResetHardcore implements ModInitializer {
         if (resetInProgress) {
             revive(player);
             return true;
-        }
-        config.deathsSinceLastReset++;
-        config.save(CONFIG_PATH, LOGGER);
-        if (config.deathsSinceLastReset < config.allowedDeaths) {
-            int remaining = config.allowedDeaths - config.deathsSinceLastReset;
-            LOGGER.info("Death {}/{}; {} death(s) remain before reset", config.deathsSinceLastReset, config.allowedDeaths, remaining);
-            return false;
         }
 
         resetInProgress = true;
@@ -97,12 +104,9 @@ public final class ServerResetHardcore implements ModInitializer {
                 Component.literal("\"").append(triggeringDeathMessage.copy()).append("\""), false);
         config.deathsSinceLastReset = 0;
         config.save(CONFIG_PATH, LOGGER);
-        if (config.requireConsoleConfirmation) {
-            pendingConsoleConfirmation = true;
-            confirmationPromptAtTick = server.getTickCount() + 1L;
-        } else {
-            beginRotation(server);
-        }
+
+        // Always instantly transfer players to the new overworld dimension on any player death
+        activateStandbyWorld(server);
         return true;
     }
 
@@ -147,9 +151,7 @@ public final class ServerResetHardcore implements ModInitializer {
     private static void beginRotation(MinecraftServer server) {
         pendingConsoleConfirmation = false;
         confirmationPromptAtTick = Long.MAX_VALUE;
-        rotateAtTick = server.getTickCount() + (long) config.resetDelaySeconds * 20L;
-        server.getPlayerList().broadcastSystemMessage(
-                Component.literal("A fresh world opens in " + config.resetDelaySeconds + " second(s)."), false);
+        activateStandbyWorld(server);
     }
 
     private static void tick(MinecraftServer server) {
@@ -157,55 +159,82 @@ public final class ServerResetHardcore implements ModInitializer {
             confirmationPromptAtTick = Long.MAX_VALUE;
             LOGGER.warn("Reset the world? [Y/n]");
         }
-        if (!resetInProgress || server.getTickCount() < rotateAtTick) return;
-        rotateAtTick = Long.MAX_VALUE;
-        rotateWorld(server);
+        if (cleanupWorldNumber < 0 || server.getTickCount() < cleanupAtTick) return;
+        int oldNumber = cleanupWorldNumber;
+        cleanupWorldNumber = -1;
+        cleanupAtTick = Long.MAX_VALUE;
+        try {
+            RotatingWorldManager.deleteWorldSet(server, oldNumber, resolveWorldPath());
+            LOGGER.warn("Deleted retired world set #{}", oldNumber);
+        } catch (Exception e) {
+            LOGGER.error("Players are safe in the new world, but old world cleanup failed", e);
+        }
     }
 
-    private static void rotateWorld(MinecraftServer server) {
+    private static void activateStandbyWorld(MinecraftServer server) {
         int oldNumber = currentWorldNumber();
         int newNumber = oldNumber + 1;
-        long newSeed = newWorldSeed();
         final ServerLevel newWorld;
         try {
-            newWorld = RotatingWorldManager.ensureWorldSet(server, newNumber, newSeed);
+            newWorld = RotatingWorldManager.ensureOverworld(server, newNumber, config.nextOverworldSeed);
         } catch (RuntimeException e) {
             resetInProgress = false;
-            LOGGER.error("Could not create the replacement world; the old world was kept", e);
+            LOGGER.error("Could not open the standby world; the old world was kept", e);
             server.getPlayerList().broadcastSystemMessage(Component.literal("World reset failed; the old world was kept."), false);
             return;
         }
 
-        CompletableFuture<?> spawnFuture = RotatingWorldManager.findSpawn(newWorld).thenAccept(spawn -> server.execute(() -> {
+        Vec3 spawn = standbySpawnPos;
+        if (spawn == null && standbySpawn != null && standbySpawn.isDone()) {
             try {
-                for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
-                    wipePlayer(player);
-                    RotatingWorldManager.teleport(player, newWorld, spawn);
-                }
-                config.resetCount++;
-                config.activeWorldSeed = newSeed;
-                config.save(CONFIG_PATH, LOGGER);
-                updateServerPropertiesMotd();
-                RotatingWorldManager.deleteWorldSet(server, oldNumber, resolveWorldPath());
-                LOGGER.warn("Completed live world reset #{}; old gameplay dimension deleted", config.resetCount);
-                server.getPlayerList().broadcastSystemMessage(Component.literal("The fresh world is ready."), false);
-            } catch (Exception e) {
-                LOGGER.error("Players reached the new world, but cleanup of the old world failed", e);
-            } finally {
-                resetInProgress = false;
-                triggeringDeathMessage = null;
+                spawn = standbySpawn.join();
+            } catch (Exception ignored) {}
+        }
+        if (spawn == null) {
+            spawn = RotatingWorldManager.getImmediateSafeSpawn(newWorld);
+        }
+        activeSpawnPos = spawn;
+
+        try {
+            for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
+                wipePlayer(player);
+                RotatingWorldManager.teleport(player, newWorld, spawn);
             }
-        }));
-        spawnFuture.exceptionally(error -> {
-            server.execute(() -> {
-                resetInProgress = false;
-                LOGGER.error("Could not prepare a safe spawn in the replacement world", error);
-            });
-            return null;
-        });
+            long newNetherSeed = uniqueSeed(config.nextOverworldSeed);
+            long newEndSeed = uniqueSeed(config.nextOverworldSeed, newNetherSeed);
+            RotatingWorldManager.ensureNetherAndEnd(server, newNumber, newNetherSeed, newEndSeed);
+            config.resetCount++;
+            config.activeOverworldSeed = config.nextOverworldSeed;
+            config.activeNetherSeed = newNetherSeed;
+            config.activeEndSeed = newEndSeed;
+            config.nextOverworldSeed = uniqueSeed(
+                    config.activeOverworldSeed, config.activeNetherSeed, config.activeEndSeed);
+            config.save(CONFIG_PATH, LOGGER);
+            updateServerPropertiesMotd();
+
+            // Always create the next standby overworld dimension ahead of time with a unique seed!
+            ServerLevel nextStandby = RotatingWorldManager.ensureOverworld(
+                    server, newNumber + 1, config.nextOverworldSeed);
+            standbySpawnPos = null;
+            standbySpawn = RotatingWorldManager.findSpawn(nextStandby);
+            standbySpawn.thenAccept(pos -> standbySpawnPos = pos);
+
+            cleanupWorldNumber = oldNumber;
+            cleanupAtTick = server.getTickCount() + (long) config.resetDelaySeconds * 20L;
+            LOGGER.warn("Players moved instantly to world set #{}; old set retires in {} second(s)",
+                    newNumber, config.resetDelaySeconds);
+            server.getPlayerList().broadcastSystemMessage(Component.literal("The fresh world is ready."), false);
+        } catch (Exception e) {
+            resetInProgress = false;
+            LOGGER.error("Could not finish activating the standby world", e);
+            return;
+        }
+        resetInProgress = false;
+        triggeringDeathMessage = null;
     }
 
     private static void wipePlayer(ServerPlayer player) {
+        player.stopRiding();
         player.getInventory().clearContent();
         player.getEnderChestInventory().clearContent();
         player.setExperiencePoints(0);
@@ -215,6 +244,7 @@ public final class ServerResetHardcore implements ModInitializer {
         player.removeAllEffects();
         player.setHealth(player.getMaxHealth());
         player.setAbsorptionAmount(0.0F);
+        player.clearFire();
         player.getFoodData().setFoodLevel(20);
         player.getFoodData().setSaturation(5.0F);
         player.setRespawnPosition(null, false);
@@ -225,16 +255,71 @@ public final class ServerResetHardcore implements ModInitializer {
     private static void moveJoiningPlayer(ServerPlayer player, MinecraftServer server) {
         ServerLevel active = server.getLevel(RotatingWorldManager.keyFor(currentWorldNumber()));
         if (active == null || player.level() == active) return;
-        RotatingWorldManager.findSpawn(active).thenAccept(spawn -> server.execute(() -> {
-            if (player.connection != null) RotatingWorldManager.teleport(player, active, spawn);
-        }));
+        Vec3 spawn = activeSpawnPos;
+        if (spawn != null) {
+            RotatingWorldManager.teleport(player, active, spawn);
+        } else {
+            RotatingWorldManager.findSpawn(active).thenAccept(s -> server.execute(() -> {
+                activeSpawnPos = s;
+                if (player.connection != null) RotatingWorldManager.teleport(player, active, s);
+            }));
+        }
     }
 
     private static int currentWorldNumber() { return config.resetCount + 1; }
 
-    private static long newWorldSeed() {
+    private static void ensureUniqueSeeds(MinecraftServer server) {
+        if (server != null) {
+            USED_SEEDS.add(server.getWorldGenSettings().options().seed());
+        }
+        boolean changed = false;
+        if (config.activeOverworldSeed == 0L || USED_SEEDS.contains(config.activeOverworldSeed)) {
+            config.activeOverworldSeed = uniqueSeed();
+            changed = true;
+        } else {
+            USED_SEEDS.add(config.activeOverworldSeed);
+        }
+        if (config.activeNetherSeed == 0L || USED_SEEDS.contains(config.activeNetherSeed)) {
+            config.activeNetherSeed = uniqueSeed();
+            changed = true;
+        } else {
+            USED_SEEDS.add(config.activeNetherSeed);
+        }
+        if (config.activeEndSeed == 0L || USED_SEEDS.contains(config.activeEndSeed)) {
+            config.activeEndSeed = uniqueSeed();
+            changed = true;
+        } else {
+            USED_SEEDS.add(config.activeEndSeed);
+        }
+        if (config.nextOverworldSeed == 0L || USED_SEEDS.contains(config.nextOverworldSeed)) {
+            config.nextOverworldSeed = uniqueSeed();
+            changed = true;
+        } else {
+            USED_SEEDS.add(config.nextOverworldSeed);
+        }
+        if (changed) config.save(CONFIG_PATH, LOGGER);
+        registerKnownSeeds();
+    }
+
+    private static void registerKnownSeeds() {
+        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.OVERWORLD), config.activeOverworldSeed);
+        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.NETHER), config.activeNetherSeed);
+        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.END), config.activeEndSeed);
+        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber() + 1, RotatingWorldManager.WorldPart.OVERWORLD), config.nextOverworldSeed);
+    }
+
+    private static long uniqueSeed(long... excluded) {
         long seed;
-        do seed = ThreadLocalRandom.current().nextLong(); while (seed == 0L);
+        outer: do {
+            seed = ThreadLocalRandom.current().nextLong();
+            if (seed == 0L) continue;
+            for (long value : excluded) {
+                if (seed == value) continue outer;
+            }
+            if (USED_SEEDS.contains(seed)) continue;
+            break;
+        } while (true);
+        USED_SEEDS.add(seed);
         return seed;
     }
 

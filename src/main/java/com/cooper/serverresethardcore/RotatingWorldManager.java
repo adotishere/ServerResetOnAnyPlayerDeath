@@ -24,6 +24,8 @@ import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
@@ -34,11 +36,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 public final class RotatingWorldManager {
     public enum WorldPart { OVERWORLD, NETHER, END }
+    private static final Map<ResourceKey<Level>, Long> SEED_REGISTRY = new ConcurrentHashMap<>();
+
     private RotatingWorldManager() {}
+
+    public static void registerSeed(ResourceKey<Level> key, long seed) {
+        SEED_REGISTRY.put(key, seed);
+    }
+
+    public static Long getRegisteredSeed(ResourceKey<Level> key) {
+        return SEED_REGISTRY.get(key);
+    }
+
+    public static void unregisterSeed(ResourceKey<Level> key) {
+        SEED_REGISTRY.remove(key);
+    }
 
     static ResourceKey<Level> keyFor(int worldNumber) {
         return keyFor(worldNumber, WorldPart.OVERWORLD);
@@ -54,15 +71,26 @@ public final class RotatingWorldManager {
                 Identifier.fromNamespaceAndPath(ServerResetHardcore.MOD_ID, "reset_" + worldNumber + suffix));
     }
 
-    static ServerLevel ensureWorldSet(MinecraftServer server, int worldNumber, long seed) {
-        ServerLevel overworld = ensureWorld(server, worldNumber, seed, WorldPart.OVERWORLD);
-        ensureWorld(server, worldNumber, seed, WorldPart.NETHER);
-        ensureWorld(server, worldNumber, seed, WorldPart.END);
+    static ServerLevel ensureWorldSet(MinecraftServer server, int worldNumber,
+                                      long overworldSeed, long netherSeed, long endSeed) {
+        ServerLevel overworld = ensureWorld(server, worldNumber, overworldSeed, WorldPart.OVERWORLD);
+        ensureWorld(server, worldNumber, netherSeed, WorldPart.NETHER);
+        ensureWorld(server, worldNumber, endSeed, WorldPart.END);
         return overworld;
+    }
+
+    static ServerLevel ensureOverworld(MinecraftServer server, int worldNumber, long seed) {
+        return ensureWorld(server, worldNumber, seed, WorldPart.OVERWORLD);
+    }
+
+    static void ensureNetherAndEnd(MinecraftServer server, int worldNumber, long netherSeed, long endSeed) {
+        ensureWorld(server, worldNumber, netherSeed, WorldPart.NETHER);
+        ensureWorld(server, worldNumber, endSeed, WorldPart.END);
     }
 
     private static ServerLevel ensureWorld(MinecraftServer server, int worldNumber, long seed, WorldPart part) {
         ResourceKey<Level> key = keyFor(worldNumber, part);
+        registerSeed(key, seed);
         ServerLevel existing = server.getLevel(key);
         if (existing != null) return existing;
 
@@ -117,6 +145,17 @@ public final class RotatingWorldManager {
         return PlayerSpawnFinder.findSpawn(world, world.getRespawnData().pos());
     }
 
+    static Vec3 getImmediateSafeSpawn(ServerLevel world) {
+        BlockPos respawnPos = world.getRespawnData().pos();
+        int x = respawnPos.getX();
+        int z = respawnPos.getZ();
+        int y = world.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z);
+        if (y < world.getMinY() + 1) {
+            y = 80;
+        }
+        return new Vec3(x + 0.5, y + 1.0, z + 0.5);
+    }
+
     static void teleport(ServerPlayer player, ServerLevel world, Vec3 spawn) {
         player.teleportTo(world, spawn.x, spawn.y, spawn.z, Set.<Relative>of(), 0.0F, 0.0F, true);
     }
@@ -126,6 +165,7 @@ public final class RotatingWorldManager {
     }
 
     private static void deleteWorld(MinecraftServer server, ResourceKey<Level> key, Path worldFolder) throws IOException {
+        unregisterSeed(key);
         Map<ResourceKey<Level>, ServerLevel> levels = ((MinecraftServerAccessor) server).serverResetHardcore$getLevels();
         ServerLevel old = levels.remove(key);
         if (old != null) {

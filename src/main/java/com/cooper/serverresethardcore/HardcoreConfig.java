@@ -23,7 +23,10 @@ public final class HardcoreConfig {
     public String motdText = "A new world awaits";
     public int resetCount = 0;
     public int deathsSinceLastReset = 0;
-    public long activeWorldSeed = 0L;
+    public long activeOverworldSeed = 0L;
+    public long activeNetherSeed = 0L;
+    public long activeEndSeed = 0L;
+    public long nextOverworldSeed = 0L;
 
     static HardcoreConfig load(Path path, Logger logger) {
         try {
@@ -39,6 +42,9 @@ public final class HardcoreConfig {
                 if (config == null) config = new HardcoreConfig();
                 if (!json.has("resetDelaySeconds") && json.has("shutdownDelaySeconds")) {
                     config.resetDelaySeconds = json.get("shutdownDelaySeconds").getAsInt();
+                }
+                if (!json.has("activeOverworldSeed") && json.has("activeWorldSeed")) {
+                    config.activeOverworldSeed = json.get("activeWorldSeed").getAsLong();
                 }
                 config.sanitize();
                 config.save(path, logger);
@@ -71,10 +77,11 @@ public final class HardcoreConfig {
     }
 
     private void sanitize() {
-        allowedDeaths = Math.max(1, allowedDeaths);
+        allowedDeaths = 1;
+        requireConsoleConfirmation = false;
         resetDelaySeconds = Math.max(0, resetDelaySeconds);
         resetCount = Math.max(0, resetCount);
-        deathsSinceLastReset = Math.max(0, deathsSinceLastReset);
+        deathsSinceLastReset = 0;
         if (motdText == null) motdText = "";
         motdText = motdText.replace('\n', ' ').replace('\r', ' ');
     }
