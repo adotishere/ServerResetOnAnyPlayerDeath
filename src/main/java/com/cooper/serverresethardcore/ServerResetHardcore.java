@@ -20,6 +20,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +28,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Locale;
+import java.util.UUID;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -61,6 +63,19 @@ public final class ServerResetHardcore implements ModInitializer {
     private static volatile Vec3 standbySpawnPos;
     private static Component triggeringDeathMessage;
     private static final Set<Long> USED_SEEDS = ConcurrentHashMap.newKeySet();
+    private static final Set<UUID> PENDING_WIPES = ConcurrentHashMap.newKeySet();
+
+    public static void markPendingWipe(UUID uuid) {
+        PENDING_WIPES.add(uuid);
+    }
+
+    public static boolean shouldWipe(UUID uuid) {
+        return PENDING_WIPES.remove(uuid);
+    }
+
+    public static Vec3 getActiveSpawnPos() {
+        return activeSpawnPos;
+    }
 
     public static boolean isResetInProgress() {
         return resetInProgress;
@@ -314,6 +329,10 @@ public final class ServerResetHardcore implements ModInitializer {
             resetInProgress = false;
 
             for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
+                player.setRespawnPosition(null, false);
+            }
+
+            for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
                 ServerPlayer targetPlayer = player;
                 if (player.isDeadOrDying()) {
                     targetPlayer = server.getPlayerList().respawn(player, false, Entity.RemovalReason.KILLED);
@@ -387,21 +406,16 @@ public final class ServerResetHardcore implements ModInitializer {
         }
         ServerLevel active = server.getLevel(RotatingWorldManager.keyFor(currentWorldNumber()));
         if (active == null) return;
-        var dim = player.level().dimension();
-        boolean inCurrentSet = dim.equals(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.OVERWORLD))
-                || dim.equals(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.NETHER))
-                || dim.equals(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.END));
-        if (!inCurrentSet) {
+        if (shouldWipe(player.getUUID())) {
             wipePlayer(player);
-            Vec3 spawn = activeSpawnPos;
-            if (spawn != null) {
+        }
+        var dim = player.level().dimension();
+        if (!isDimensionInCurrentActiveSet(dim)) {
+            server.execute(() -> {
+                wipePlayer(player);
+                Vec3 spawn = activeSpawnPos != null ? activeSpawnPos : RotatingWorldManager.getImmediateSafeSpawn(active);
                 RotatingWorldManager.teleport(player, active, spawn);
-            } else {
-                RotatingWorldManager.findSpawn(active).thenAccept(s -> server.execute(() -> {
-                    activeSpawnPos = s;
-                    if (player.connection != null) RotatingWorldManager.teleport(player, active, s);
-                }));
-            }
+            });
         }
         if (player.connection instanceof ServerGamePacketListenerImplAccessor accessor) {
             accessor.serverResetHardcore$setWaitingForRespawn(false);
@@ -409,7 +423,15 @@ public final class ServerResetHardcore implements ModInitializer {
         }
     }
 
-    private static int currentWorldNumber() { return config.resetCount + 1; }
+    public static int currentWorldNumber() { return config.resetCount + 1; }
+
+    public static boolean isDimensionInCurrentActiveSet(ResourceKey<Level> dim) {
+        if (dim == null) return false;
+        int current = currentWorldNumber();
+        return dim.equals(RotatingWorldManager.keyFor(current, RotatingWorldManager.WorldPart.OVERWORLD))
+                || dim.equals(RotatingWorldManager.keyFor(current, RotatingWorldManager.WorldPart.NETHER))
+                || dim.equals(RotatingWorldManager.keyFor(current, RotatingWorldManager.WorldPart.END));
+    }
 
     private static void ensureUniqueSeeds(MinecraftServer server) {
         if (server != null) {

@@ -62,11 +62,11 @@ public final class RotatingWorldManager {
         SEED_REGISTRY.remove(key);
     }
 
-    static ResourceKey<Level> keyFor(int worldNumber) {
+    public static ResourceKey<Level> keyFor(int worldNumber) {
         return keyFor(worldNumber, WorldPart.OVERWORLD);
     }
 
-    static ResourceKey<Level> keyFor(int worldNumber, WorldPart part) {
+    public static ResourceKey<Level> keyFor(int worldNumber, WorldPart part) {
         String suffix = switch (part) {
             case OVERWORLD -> "";
             case NETHER -> "_nether";
