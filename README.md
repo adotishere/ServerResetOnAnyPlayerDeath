@@ -1,22 +1,25 @@
 # Server Reset On Any Player Death
 
-A dedicated-server Fabric mod that turns the entire Minecraft server into a shared hardcore run. When a player dies and the death allowance is reached, every online player is synchronized to the death screen, the triggering death message is broadcast in quotes, and a fresh world set (Overworld, Nether, and End) is seamlessly activated—**completely restartless**, with no server shutdown or batch loop needed!
-
-The previous world set is cleanly unloaded and deleted in the background once players have moved to the new world.
+A dedicated-server Fabric mod that turns your Minecraft server into a shared hardcore run. When the death allowance is reached, players are synchronized to the death screen, the triggering death message is broadcast, and everyone is seamlessly moved into a fresh world set—**completely restartless**, with no server shutdown or restart scripts required.
 
 ---
 
-## Features
+## How It Works: The Rotating Dimensions System
 
-- **Seamless Restartless Rotation**: Fresh gameplay dimensions (`server_reset_hardcore:reset_X`, `..._nether`, `..._end`) are generated, activated, and cleaned up dynamically without stopping the server process.
-- **Synchronized Death Screen**: When any player dies, all other players are killed simultaneously so everyone enters the death screen together while waiting for the countdown or console confirmation.
-- **Pre-generated Standby World**: The next world and its spawn chunks are precalculated and generated in the background, ensuring instantaneous transitions when a reset occurs.
-- **Safe Land Spawn**: Uses climate sampling and terrain analysis to place `/setworldspawn` safely on solid ground above sea level, guaranteeing players never spawn submerged in water or oceans.
-- **Direct Dimension Login Routing**: Intercepts player login to place joining players directly into the active custom dimension at the safe spawn, preventing duplicate UUID collisions, ghost player states, and packet desync.
-- **Dynamic Portal Linking**: Nether and End portals dynamically route between sibling dimensions within the active reset set.
-- **Synchronized Seeds**: All three dimensions within a world set share the uniform `activeSeed`. Across resets, fresh unique seeds are generated automatically.
-- **Time & Weather Reset**: World time is reset to `0` (daybreak) and weather is cleared on every world reset.
-- **Persistent Datapacks**: Datapacks placed in `persistent-datapacks` are automatically copied to new worlds before startup.
+Instead of deleting and recreating the vanilla root world on disk (which requires stopping the server), the mod runs all gameplay inside dynamically generated, numbered dimension sets:
+
+- **Root World (`world`)**: Remains untouched as an internal server anchor.
+- **Active Gameplay Dimensions**: All gameplay takes place within the active numbered set:
+  - Overworld: `server_reset_hardcore:reset_<number>`
+  - The Nether: `server_reset_hardcore:reset_<number>_nether`
+  - The End: `server_reset_hardcore:reset_<number>_end`
+- **Dynamic Portal Linking**: Nether and End portals automatically link between the sibling dimensions of the currently active world set.
+- **Seamless Reset & Cleanup**:
+  1. When the death limit is reached, all players enter the death screen while the countdown or console confirmation takes place.
+  2. The next world set (`reset_<number+1>`) is activated immediately.
+  3. Players are respawned together directly in the new world set with fresh stats and cleared inventories.
+  4. The previous world set is cleanly unloaded and deleted from disk in the background.
+- **Player Routing**: Any player connecting or reconnecting to the server is routed directly into the active `reset_<number>` dimension.
 
 ---
 
@@ -24,8 +27,8 @@ The previous world set is cleanly unloaded and deleted in the background once pl
 
 1. Install [Fabric Loader](https://fabricmc.net/) and [Fabric API](https://curseforge.com/minecraft/mc-mods/fabric-api) on your dedicated server.
 2. Place `server-reset-on-any-player-death-<version>.jar` into your server's `mods` folder.
-3. Start the server. Configuration is generated at `config/server_reset_hardcore.json`.
-4. (Optional) Place any datapacks you want preserved across resets into the newly created `persistent-datapacks` folder in your server root.
+3. Start the server. The configuration file is generated at `config/server_reset_hardcore.json`.
+4. (Optional) Place any datapacks you want preserved across resets into the `persistent-datapacks` folder in your server root.
 
 ---
 
@@ -47,38 +50,34 @@ Configuration is located at `config/server_reset_hardcore.json`:
 }
 ```
 
-### Config Options
+### Options
 
-| Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `allowedDeaths` | Integer | `1` | Number of deaths allowed before triggering a world reset. |
-| `resetDelaySeconds` | Integer | `5` | Countdown in seconds before moving players to the fresh world. |
-| `trackResets` | Boolean | `true` | If true, displays the active world number in the server MOTD. |
-| `requireConsoleConfirmation` | Boolean | `false` | If true, prompts the server console for confirmation before resetting. |
-| `motdText` | String | `"A new world awaits"` | Second line text of the server MOTD when reset tracking is enabled. |
-| `resetCount` | Integer | `0` | Number of resets that have occurred (managed automatically). |
-| `deathsSinceLastReset` | Integer | `0` | Tracked deaths towards `allowedDeaths` (managed automatically). |
-| `activeSeed` | Long | `0` | Seed used for the current Overworld, Nether, and End dimensions (`0` = auto-generate unique seed). |
-| `nextSeed` | Long | `0` | Seed prepared for the upcoming standby world set (`0` = auto-generate unique seed). |
+- `allowedDeaths`: Number of deaths allowed before triggering a reset (default: `1`).
+- `resetDelaySeconds`: Countdown in seconds before moving players to the new world (default: `5`).
+- `trackResets`: Shows the active world number in the server MOTD (default: `true`).
+- `requireConsoleConfirmation`: If `true`, prompts the server console `[Y/n]` before resetting (default: `false`).
+- `motdText`: Subtext displayed on the server MOTD when reset tracking is enabled.
+- `activeSeed`: Seed used for the active Overworld, Nether, and End dimensions (`0` = auto-generate).
+- `nextSeed`: Seed prepared for the upcoming standby world set (`0` = auto-generate).
+- `resetCount` & `deathsSinceLastReset`: Managed automatically by the mod to persist across normal restarts.
 
 ---
 
 ## Console Confirmation
 
-When `requireConsoleConfirmation` is set to `true`:
-- The server pauses before world activation and prints:
+When `requireConsoleConfirmation` is enabled:
+- The server pauses before world activation and displays:
   ```
   [Server thread/WARN]: Reset the world? [Y/n]
   ```
-- Type `Y` (or press Enter) in the server console to confirm and begin the reset.
+- Type `Y` (or press Enter) in the server console to confirm and activate the fresh world.
 - Type `N` in the server console to cancel the reset.
-- In-game player commands cannot confirm console prompts.
 
 ---
 
-## Server Launch Script
+## Launch Example
 
-Because resets occur in-memory without server shutdown, a simple launch script is all you need:
+Because resets take place live in-memory without server restarts, a standard launch script is all that is needed:
 
 ```bat
 @echo off
