@@ -27,6 +27,7 @@ import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
@@ -170,19 +171,45 @@ public final class RotatingWorldManager {
         return !path.endsWith("_end");
     }
 
+    public static BlockPos findSafeLandSpawn(ServerLevel world) {
+        try {
+            BlockPos naturalSpawn = world.getChunkSource().randomState().sampler().findSpawnPosition();
+            if (naturalSpawn != null) {
+                int cx = naturalSpawn.getX() >> 4;
+                int cz = naturalSpawn.getZ() >> 4;
+                for (int radius = 0; radius <= 16; radius++) {
+                    for (int dx = -radius; dx <= radius; dx++) {
+                        for (int dz = -radius; dz <= radius; dz++) {
+                            if (Math.abs(dx) == radius || Math.abs(dz) == radius) {
+                                ChunkPos candidate = new ChunkPos(cx + dx, cz + dz);
+                                world.getChunk(candidate.x(), candidate.z(), ChunkStatus.FULL, true);
+                                BlockPos safe = PlayerSpawnFinder.getSpawnPosInChunk(world, candidate);
+                                if (safe != null) {
+                                    return safe;
+                                }
+                            }
+                        }
+                    }
+                }
+                int y = world.getHeight(Heightmap.Types.WORLD_SURFACE, naturalSpawn.getX(), naturalSpawn.getZ());
+                return new BlockPos(naturalSpawn.getX(), Math.max(y, world.getMinY() + 64), naturalSpawn.getZ());
+            }
+        } catch (Exception e) {
+            ServerResetHardcore.LOGGER.warn("Failed to sample natural land spawn, falling back", e);
+        }
+        BlockPos fallback = world.getRespawnData().pos();
+        int y = world.getHeight(Heightmap.Types.WORLD_SURFACE, fallback.getX(), fallback.getZ());
+        return new BlockPos(fallback.getX(), Math.max(y, world.getMinY() + 64), fallback.getZ());
+    }
+
     static CompletableFuture<Vec3> findSpawn(ServerLevel world) {
-        return PlayerSpawnFinder.findSpawn(world, world.getRespawnData().pos());
+        BlockPos landSpawn = findSafeLandSpawn(world);
+        return PlayerSpawnFinder.findSpawn(world, landSpawn);
     }
 
     static Vec3 getImmediateSafeSpawn(ServerLevel world) {
-        BlockPos respawnPos = world.getRespawnData().pos();
-        int x = respawnPos.getX();
-        int z = respawnPos.getZ();
-        int y = world.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z);
-        if (y < world.getMinY() + 1) {
-            y = 80;
-        }
-        return new Vec3(x + 0.5, y + 1.0, z + 0.5);
+        BlockPos safe = findSafeLandSpawn(world);
+        return Vec3.atCenterOf(safe);
     }
 
     static void teleport(ServerPlayer player, ServerLevel world, Vec3 spawn) {

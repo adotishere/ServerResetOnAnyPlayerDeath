@@ -1,5 +1,6 @@
 package com.cooper.serverresethardcore;
 
+import com.cooper.serverresethardcore.mixin.ServerGamePacketListenerImplAccessor;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
 import net.fabricmc.api.ModInitializer;
@@ -10,6 +11,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -17,12 +19,14 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.Locale;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -62,6 +66,20 @@ public final class ServerResetHardcore implements ModInitializer {
         return resetInProgress;
     }
 
+    public static void setWorldSpawn(MinecraftServer server, ServerLevel world, BlockPos pos) {
+        LevelData.RespawnData respawnData = LevelData.RespawnData.of(world.dimension(), pos, 0.0F, 0.0F);
+        world.setRespawnData(respawnData);
+        server.setRespawnData(respawnData);
+        try {
+            server.getCommands().performPrefixedCommand(
+                server.createCommandSourceStack().withLevel(world),
+                String.format(Locale.ROOT, "setworldspawn %d %d %d", pos.getX(), pos.getY(), pos.getZ())
+            );
+        } catch (Exception e) {
+            LOGGER.error("Failed to run /setworldspawn command", e);
+        }
+    }
+
     private static void pregenerateStandbyWorld(MinecraftServer server, int worldNumber, long seed) {
         try {
             ServerLevel standby = RotatingWorldManager.ensureWorldSet(server, worldNumber, seed);
@@ -69,8 +87,11 @@ public final class ServerResetHardcore implements ModInitializer {
             standbySpawn = RotatingWorldManager.findSpawn(standby);
             standbyChunksReady = standbySpawn.thenCompose(spawn -> {
                 standbySpawnPos = spawn;
-                LOGGER.info("Standby world #{} spawn found at ({}, {}, {}). Pregenerating spawn chunks...",
-                        worldNumber, (int) spawn.x, (int) spawn.y, (int) spawn.z);
+                BlockPos spawnBlock = BlockPos.containing(spawn);
+                LevelData.RespawnData respawnData = LevelData.RespawnData.of(standby.dimension(), spawnBlock, 0.0F, 0.0F);
+                standby.setRespawnData(respawnData);
+                LOGGER.info("Standby world #{} safe land spawn at ({}, {}, {}). Pregenerating spawn chunks...",
+                        worldNumber, spawnBlock.getX(), spawnBlock.getY(), spawnBlock.getZ());
                 return RotatingWorldManager.pregenerateChunks(standby, spawn, 2);
             });
             standbyChunksReady.thenRun(() -> {
@@ -98,7 +119,13 @@ public final class ServerResetHardcore implements ModInitializer {
             USED_SEEDS.add(server.getWorldGenSettings().options().seed());
             try {
                 ServerLevel active = RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(), config.activeSeed);
-                RotatingWorldManager.findSpawn(active).thenAccept(pos -> activeSpawnPos = pos);
+                BlockPos initialSpawn = RotatingWorldManager.findSafeLandSpawn(active);
+                setWorldSpawn(server, active, initialSpawn);
+                activeSpawnPos = Vec3.atCenterOf(initialSpawn);
+                RotatingWorldManager.findSpawn(active).thenAccept(pos -> {
+                    activeSpawnPos = pos;
+                    setWorldSpawn(server, active, BlockPos.containing(pos));
+                });
                 pregenerateStandbyWorld(server, currentWorldNumber() + 1, config.nextSeed);
             } catch (RuntimeException e) {
                 LOGGER.error("Could not load the active or standby gameplay world", e);
@@ -258,30 +285,52 @@ public final class ServerResetHardcore implements ModInitializer {
             }
         }
 
-        Vec3 spawn = standbySpawnPos;
-        if (spawn == null && standbySpawn != null && standbySpawn.isDone()) {
+        BlockPos spawnBlock;
+        if (standbySpawnPos != null) {
+            spawnBlock = BlockPos.containing(standbySpawnPos);
+        } else if (standbySpawn != null && standbySpawn.isDone()) {
             try {
-                spawn = standbySpawn.join();
-            } catch (Exception ignored) {}
+                spawnBlock = BlockPos.containing(standbySpawn.join());
+            } catch (Exception e) {
+                spawnBlock = RotatingWorldManager.findSafeLandSpawn(newWorld);
+            }
+        } else {
+            spawnBlock = RotatingWorldManager.findSafeLandSpawn(newWorld);
         }
-        if (spawn == null) {
-            spawn = RotatingWorldManager.getImmediateSafeSpawn(newWorld);
-        }
-        activeSpawnPos = spawn;
+        activeSpawnPos = Vec3.atCenterOf(spawnBlock);
+
+        setWorldSpawn(server, newWorld, spawnBlock);
 
         try {
+            for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
+                if (!player.isDeadOrDying()) {
+                    if (player.isSpectator()) {
+                        player.setGameMode(GameType.SURVIVAL);
+                    }
+                    player.kill(player.level());
+                }
+            }
+
+            resetInProgress = false;
+
             for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
                 ServerPlayer targetPlayer = player;
                 if (player.isDeadOrDying()) {
                     targetPlayer = server.getPlayerList().respawn(player, false, Entity.RemovalReason.KILLED);
-                    if (targetPlayer.connection != null) {
-                        targetPlayer.connection.player = targetPlayer;
-                        targetPlayer.connection.resetPosition();
-                    }
                 }
                 targetPlayer.setGameMode(GameType.SURVIVAL);
                 wipePlayer(targetPlayer);
-                RotatingWorldManager.teleport(targetPlayer, newWorld, spawn);
+                if (targetPlayer.level() != newWorld) {
+                    RotatingWorldManager.teleport(targetPlayer, newWorld, activeSpawnPos);
+                }
+                if (targetPlayer.connection != null) {
+                    targetPlayer.connection.player = targetPlayer;
+                    targetPlayer.connection.resetPosition();
+                    if (targetPlayer.connection instanceof ServerGamePacketListenerImplAccessor accessor) {
+                        accessor.serverResetHardcore$setWaitingForRespawn(false);
+                        accessor.serverResetHardcore$setClientLoadedTimeoutTimer(0);
+                    }
+                }
             }
             RotatingWorldManager.resetWorldTime(server);
             RotatingWorldManager.clearWeather(server);
@@ -353,6 +402,10 @@ public final class ServerResetHardcore implements ModInitializer {
                     if (player.connection != null) RotatingWorldManager.teleport(player, active, s);
                 }));
             }
+        }
+        if (player.connection instanceof ServerGamePacketListenerImplAccessor accessor) {
+            accessor.serverResetHardcore$setWaitingForRespawn(false);
+            accessor.serverResetHardcore$setClientLoadedTimeoutTimer(0);
         }
     }
 

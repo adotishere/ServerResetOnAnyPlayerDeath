@@ -2,6 +2,6 @@
   "required": true,
   "package": "com.cooper.serverresethardcore.mixin",
   "compatibilityLevel": "JAVA_25",
-  "mixins": ["BaseFireBlockMixin", "DedicatedServerMixin", "EndPortalBlockMixin", "MinecraftServerAccessor", "MinecraftServerMixin", "NetherPortalBlockMixin", "ServerGamePacketListenerImplMixin", "ServerLevelMixin", "ServerPlayerMixin"],
+  "mixins": ["BaseFireBlockMixin", "DedicatedServerMixin", "EndPortalBlockMixin", "MinecraftServerAccessor", "MinecraftServerMixin", "NetherPortalBlockMixin", "ServerGamePacketListenerImplAccessor", "ServerGamePacketListenerImplMixin", "ServerLevelMixin", "ServerPlayerMixin"],
   "injectors": { "defaultRequire": 1 }
 }
