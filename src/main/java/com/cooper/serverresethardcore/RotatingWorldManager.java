@@ -22,6 +22,7 @@ import net.minecraft.world.level.biome.TheEndBiomeSource;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.core.BlockPos;
@@ -166,6 +167,24 @@ public final class RotatingWorldManager {
 
     static void teleport(ServerPlayer player, ServerLevel world, Vec3 spawn) {
         player.teleportTo(world, spawn.x, spawn.y, spawn.z, Set.<Relative>of(), 0.0F, 0.0F, true);
+    }
+
+    public static void resetWorldTime(MinecraftServer server) {
+        try {
+            if (server.getWorldData() != null && server.getWorldData().overworldData() != null) {
+                server.getWorldData().overworldData().setGameTime(0L);
+            }
+            server.registryAccess().lookup(Registries.WORLD_CLOCK).ifPresent(lookup ->
+                lookup.listElements().forEach(clock ->
+                    server.clockManager().setTotalTicks(clock, 0L)
+                )
+            );
+            if (server.getPlayerList() != null) {
+                server.getPlayerList().broadcastAll(server.clockManager().createFullSyncPacket());
+            }
+        } catch (Exception e) {
+            ServerResetHardcore.LOGGER.error("Failed to reset world time to 0", e);
+        }
     }
 
     static void deleteWorldSet(MinecraftServer server, int worldNumber, Path worldFolder) throws IOException {
