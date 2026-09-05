@@ -12,7 +12,7 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.Redirect;
 
 import java.util.Optional;
 
@@ -20,8 +20,18 @@ import java.util.Optional;
 abstract class PrepareSpawnTaskMixin {
     @Shadow @Final private NameAndId nameAndId;
 
-    @ModifyVariable(method = "start", at = @At("STORE"))
-    private ServerPlayer.SavedPosition serverResetHardcore$routeToActiveDimension(ServerPlayer.SavedPosition loadedPosition) {
+    @SuppressWarnings("unchecked")
+    @Redirect(
+        method = "start",
+        at = @At(
+            value = "INVOKE",
+            target = "Ljava/util/Optional;orElse(Ljava/lang/Object;)Ljava/lang/Object;",
+            ordinal = 0
+        )
+    )
+    private Object serverResetHardcore$routeSavedPosition(Optional<?> optional, Object fallback) {
+        ServerPlayer.SavedPosition loadedPosition = (ServerPlayer.SavedPosition) ((Optional<ServerPlayer.SavedPosition>) optional)
+                .orElse((ServerPlayer.SavedPosition) fallback);
         ResourceKey<Level> activeDim = RotatingWorldManager.keyFor(ServerResetHardcore.currentWorldNumber());
         boolean inCurrentSet = loadedPosition != null
                 && loadedPosition.dimension().isPresent()
