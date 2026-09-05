@@ -34,8 +34,11 @@ abstract class EndPortalBlockMixin {
         }
 
         if (!fromEnd) {
-            Vec3 spawn = ServerLevel.END_SPAWN_POINT.getBottomCenter().subtract(0.0, entity instanceof ServerPlayer ? 1.0 : 0.0, 0.0);
-            EndPlatformFeature.createEndPlatform(destination, BlockPos.containing(spawn).below(), true);
+            EndPlatformFeature.createEndPlatform(destination, ServerLevel.END_SPAWN_POINT.below(), true);
+            Vec3 spawn = ServerLevel.END_SPAWN_POINT.getBottomCenter();
+            if (entity instanceof ServerPlayer) {
+                spawn = spawn.subtract(0.0, 1.0, 0.0);
+            }
             cir.setReturnValue(new TeleportTransition(destination, spawn, Vec3.ZERO, Direction.WEST.toYRot(), 0.0F,
                     Relative.union(Relative.DELTA, Set.of(Relative.X_ROT)),
                     TeleportTransition.PLAY_PORTAL_SOUND.then(TeleportTransition.PLACE_PORTAL_TICKET)));
