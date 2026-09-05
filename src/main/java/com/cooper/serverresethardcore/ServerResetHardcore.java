@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 public final class ServerResetHardcore implements ModInitializer {
@@ -50,9 +51,8 @@ public final class ServerResetHardcore implements ModInitializer {
     private static long cleanupAtTick = Long.MAX_VALUE;
     private static int cleanupWorldNumber = -1;
     private static int pendingPostResetWorldNumber = -1;
-    private static long pendingNetherSeed;
-    private static long pendingEndSeed;
     private static CompletableFuture<Vec3> standbySpawn;
+    private static CompletableFuture<Void> standbyChunksReady;
     private static volatile Vec3 activeSpawnPos;
     private static volatile Vec3 standbySpawnPos;
     private static Component triggeringDeathMessage;
@@ -60,6 +60,25 @@ public final class ServerResetHardcore implements ModInitializer {
 
     public static boolean isResetInProgress() {
         return resetInProgress;
+    }
+
+    private static void pregenerateStandbyWorld(MinecraftServer server, int worldNumber, long seed) {
+        try {
+            ServerLevel standby = RotatingWorldManager.ensureWorldSet(server, worldNumber, seed);
+            standbySpawnPos = null;
+            standbySpawn = RotatingWorldManager.findSpawn(standby);
+            standbyChunksReady = standbySpawn.thenCompose(spawn -> {
+                standbySpawnPos = spawn;
+                LOGGER.info("Standby world #{} spawn found at ({}, {}, {}). Pregenerating spawn chunks...",
+                        worldNumber, (int) spawn.x, (int) spawn.y, (int) spawn.z);
+                return RotatingWorldManager.pregenerateChunks(standby, spawn, 2);
+            });
+            standbyChunksReady.thenRun(() -> {
+                LOGGER.info("Standby world #{} spawn chunks pregenerated and ready.", worldNumber);
+            });
+        } catch (Exception e) {
+            LOGGER.error("Failed to pregenerate standby world #{}", worldNumber, e);
+        }
     }
 
     @Override
@@ -78,14 +97,9 @@ public final class ServerResetHardcore implements ModInitializer {
             pendingPostResetWorldNumber = -1;
             USED_SEEDS.add(server.getWorldGenSettings().options().seed());
             try {
-                ServerLevel active = RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(),
-                        config.activeOverworldSeed, config.activeNetherSeed, config.activeEndSeed);
+                ServerLevel active = RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(), config.activeSeed);
                 RotatingWorldManager.findSpawn(active).thenAccept(pos -> activeSpawnPos = pos);
-                ServerLevel standby = RotatingWorldManager.ensureOverworld(
-                        server, currentWorldNumber() + 1, config.nextOverworldSeed);
-                standbySpawnPos = null;
-                standbySpawn = RotatingWorldManager.findSpawn(standby);
-                standbySpawn.thenAccept(pos -> standbySpawnPos = pos);
+                pregenerateStandbyWorld(server, currentWorldNumber() + 1, config.nextSeed);
             } catch (RuntimeException e) {
                 LOGGER.error("Could not load the active or standby gameplay world", e);
             }
@@ -184,18 +198,11 @@ public final class ServerResetHardcore implements ModInitializer {
     private static void tick(MinecraftServer server) {
         if (pendingPostResetWorldNumber > 0) {
             int num = pendingPostResetWorldNumber;
-            long netherSeed = pendingNetherSeed;
-            long endSeed = pendingEndSeed;
             pendingPostResetWorldNumber = -1;
             try {
-                RotatingWorldManager.ensureNetherAndEnd(server, num, netherSeed, endSeed);
-                ServerLevel nextStandby = RotatingWorldManager.ensureOverworld(
-                        server, num + 1, config.nextOverworldSeed);
-                standbySpawnPos = null;
-                standbySpawn = RotatingWorldManager.findSpawn(nextStandby);
-                standbySpawn.thenAccept(pos -> standbySpawnPos = pos);
+                pregenerateStandbyWorld(server, num + 1, config.nextSeed);
             } catch (Exception e) {
-                LOGGER.error("Could not complete post-reset dimension generation", e);
+                LOGGER.error("Could not complete post-reset next world pregeneration", e);
             } finally {
                 resetInProgress = false;
                 triggeringDeathMessage = null;
@@ -226,12 +233,29 @@ public final class ServerResetHardcore implements ModInitializer {
         int newNumber = oldNumber + 1;
         final ServerLevel newWorld;
         try {
-            newWorld = RotatingWorldManager.ensureOverworld(server, newNumber, config.nextOverworldSeed);
+            newWorld = RotatingWorldManager.ensureWorldSet(server, newNumber, config.nextSeed);
         } catch (RuntimeException e) {
             resetInProgress = false;
             LOGGER.error("Could not open the standby world; the old world was kept", e);
             server.getPlayerList().broadcastSystemMessage(Component.literal("World reset failed; the old world was kept."), false);
             return;
+        }
+
+        if (standbySpawn != null && !standbySpawn.isDone()) {
+            try {
+                LOGGER.info("Waiting for standby world spawn calculation...");
+                standbySpawn.get(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOGGER.warn("Timed out or interrupted waiting for standby spawn", e);
+            }
+        }
+        if (standbyChunksReady != null && !standbyChunksReady.isDone()) {
+            try {
+                LOGGER.info("Waiting for standby spawn chunk pregeneration...");
+                standbyChunksReady.get(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOGGER.warn("Timed out or interrupted waiting for standby chunks", e);
+            }
         }
 
         Vec3 spawn = standbySpawnPos;
@@ -261,18 +285,14 @@ public final class ServerResetHardcore implements ModInitializer {
             }
             RotatingWorldManager.resetWorldTime(server);
             RotatingWorldManager.clearWeather(server);
-            long activeSeed = config.nextOverworldSeed;
+            long newActiveSeed = config.nextSeed;
             config.resetCount++;
-            config.activeOverworldSeed = activeSeed;
-            config.activeNetherSeed = activeSeed;
-            config.activeEndSeed = activeSeed;
-            config.nextOverworldSeed = uniqueSeed(activeSeed);
+            config.activeSeed = newActiveSeed;
+            config.nextSeed = uniqueSeed(newActiveSeed);
             config.save(CONFIG_PATH, LOGGER);
             updateServerPropertiesMotd();
 
             pendingPostResetWorldNumber = newNumber;
-            pendingNetherSeed = activeSeed;
-            pendingEndSeed = activeSeed;
 
             cleanupWorldNumber = oldNumber;
             cleanupAtTick = server.getTickCount() + Math.max(100L, (long) config.resetDelaySeconds * 20L);
@@ -343,35 +363,27 @@ public final class ServerResetHardcore implements ModInitializer {
             USED_SEEDS.add(server.getWorldGenSettings().options().seed());
         }
         boolean changed = false;
-        if (config.activeOverworldSeed == 0L || USED_SEEDS.contains(config.activeOverworldSeed)) {
-            config.activeOverworldSeed = uniqueSeed();
+        if (config.activeSeed == 0L || USED_SEEDS.contains(config.activeSeed)) {
+            config.activeSeed = uniqueSeed();
             changed = true;
         } else {
-            USED_SEEDS.add(config.activeOverworldSeed);
+            USED_SEEDS.add(config.activeSeed);
         }
-        if (config.activeNetherSeed != config.activeOverworldSeed) {
-            config.activeNetherSeed = config.activeOverworldSeed;
-            changed = true;
-        }
-        if (config.activeEndSeed != config.activeOverworldSeed) {
-            config.activeEndSeed = config.activeOverworldSeed;
-            changed = true;
-        }
-        if (config.nextOverworldSeed == 0L || USED_SEEDS.contains(config.nextOverworldSeed) || config.nextOverworldSeed == config.activeOverworldSeed) {
-            config.nextOverworldSeed = uniqueSeed(config.activeOverworldSeed);
+        if (config.nextSeed == 0L || USED_SEEDS.contains(config.nextSeed) || config.nextSeed == config.activeSeed) {
+            config.nextSeed = uniqueSeed(config.activeSeed);
             changed = true;
         } else {
-            USED_SEEDS.add(config.nextOverworldSeed);
+            USED_SEEDS.add(config.nextSeed);
         }
         if (changed) config.save(CONFIG_PATH, LOGGER);
         registerKnownSeeds();
     }
 
     private static void registerKnownSeeds() {
-        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.OVERWORLD), config.activeOverworldSeed);
-        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.NETHER), config.activeNetherSeed);
-        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.END), config.activeEndSeed);
-        RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber() + 1, RotatingWorldManager.WorldPart.OVERWORLD), config.nextOverworldSeed);
+        for (RotatingWorldManager.WorldPart part : RotatingWorldManager.WorldPart.values()) {
+            RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber(), part), config.activeSeed);
+            RotatingWorldManager.registerSeed(RotatingWorldManager.keyFor(currentWorldNumber() + 1, part), config.nextSeed);
+        }
     }
 
     private static long uniqueSeed(long... excluded) {

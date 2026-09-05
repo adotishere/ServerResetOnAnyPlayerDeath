@@ -27,12 +27,14 @@ import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -79,6 +81,23 @@ public final class RotatingWorldManager {
         ensureWorld(server, worldNumber, netherSeed, WorldPart.NETHER);
         ensureWorld(server, worldNumber, endSeed, WorldPart.END);
         return overworld;
+    }
+
+    static ServerLevel ensureWorldSet(MinecraftServer server, int worldNumber, long seed) {
+        return ensureWorldSet(server, worldNumber, seed, seed, seed);
+    }
+
+    static CompletableFuture<Void> pregenerateChunks(ServerLevel world, Vec3 spawnPos, int radius) {
+        BlockPos blockPos = BlockPos.containing(spawnPos);
+        int centerX = blockPos.getX() >> 4;
+        int centerZ = blockPos.getZ() >> 4;
+        List<CompletableFuture<?>> futures = new ArrayList<>();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                futures.add(world.getChunkSource().getChunkFuture(centerX + dx, centerZ + dz, ChunkStatus.FULL, true));
+            }
+        }
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
     }
 
     static ServerLevel ensureOverworld(MinecraftServer server, int worldNumber, long seed) {
