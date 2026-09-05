@@ -46,6 +46,9 @@ public final class ServerResetHardcore implements ModInitializer {
     private static long confirmationPromptAtTick = Long.MAX_VALUE;
     private static long cleanupAtTick = Long.MAX_VALUE;
     private static int cleanupWorldNumber = -1;
+    private static int pendingPostResetWorldNumber = -1;
+    private static long pendingNetherSeed;
+    private static long pendingEndSeed;
     private static CompletableFuture<Vec3> standbySpawn;
     private static volatile Vec3 activeSpawnPos;
     private static volatile Vec3 standbySpawnPos;
@@ -64,6 +67,7 @@ public final class ServerResetHardcore implements ModInitializer {
             confirmationPromptAtTick = Long.MAX_VALUE;
             cleanupAtTick = Long.MAX_VALUE;
             cleanupWorldNumber = -1;
+            pendingPostResetWorldNumber = -1;
             USED_SEEDS.add(server.getWorldGenSettings().options().seed());
             try {
                 ServerLevel active = RotatingWorldManager.ensureWorldSet(server, currentWorldNumber(),
@@ -155,6 +159,25 @@ public final class ServerResetHardcore implements ModInitializer {
     }
 
     private static void tick(MinecraftServer server) {
+        if (pendingPostResetWorldNumber > 0) {
+            int num = pendingPostResetWorldNumber;
+            long netherSeed = pendingNetherSeed;
+            long endSeed = pendingEndSeed;
+            pendingPostResetWorldNumber = -1;
+            try {
+                RotatingWorldManager.ensureNetherAndEnd(server, num, netherSeed, endSeed);
+                ServerLevel nextStandby = RotatingWorldManager.ensureOverworld(
+                        server, num + 1, config.nextOverworldSeed);
+                standbySpawnPos = null;
+                standbySpawn = RotatingWorldManager.findSpawn(nextStandby);
+                standbySpawn.thenAccept(pos -> standbySpawnPos = pos);
+            } catch (Exception e) {
+                LOGGER.error("Could not complete post-reset dimension generation", e);
+            } finally {
+                resetInProgress = false;
+                triggeringDeathMessage = null;
+            }
+        }
         if (pendingConsoleConfirmation && server.getTickCount() >= confirmationPromptAtTick) {
             confirmationPromptAtTick = Long.MAX_VALUE;
             LOGGER.warn("Reset the world? [Y/n]");
@@ -202,7 +225,6 @@ public final class ServerResetHardcore implements ModInitializer {
             }
             long newNetherSeed = uniqueSeed(config.nextOverworldSeed);
             long newEndSeed = uniqueSeed(config.nextOverworldSeed, newNetherSeed);
-            RotatingWorldManager.ensureNetherAndEnd(server, newNumber, newNetherSeed, newEndSeed);
             config.resetCount++;
             config.activeOverworldSeed = config.nextOverworldSeed;
             config.activeNetherSeed = newNetherSeed;
@@ -212,12 +234,9 @@ public final class ServerResetHardcore implements ModInitializer {
             config.save(CONFIG_PATH, LOGGER);
             updateServerPropertiesMotd();
 
-            // Always create the next standby overworld dimension ahead of time with a unique seed!
-            ServerLevel nextStandby = RotatingWorldManager.ensureOverworld(
-                    server, newNumber + 1, config.nextOverworldSeed);
-            standbySpawnPos = null;
-            standbySpawn = RotatingWorldManager.findSpawn(nextStandby);
-            standbySpawn.thenAccept(pos -> standbySpawnPos = pos);
+            pendingPostResetWorldNumber = newNumber;
+            pendingNetherSeed = newNetherSeed;
+            pendingEndSeed = newEndSeed;
 
             cleanupWorldNumber = oldNumber;
             cleanupAtTick = server.getTickCount() + (long) config.resetDelaySeconds * 20L;
@@ -229,8 +248,6 @@ public final class ServerResetHardcore implements ModInitializer {
             LOGGER.error("Could not finish activating the standby world", e);
             return;
         }
-        resetInProgress = false;
-        triggeringDeathMessage = null;
     }
 
     private static void wipePlayer(ServerPlayer player) {
