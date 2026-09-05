@@ -141,6 +141,14 @@ public final class RotatingWorldManager {
         catch (NumberFormatException ignored) { return null; }
     }
 
+    public static boolean isPortalDimension(ResourceKey<Level> key) {
+        if (key == null) return false;
+        if (!key.identifier().getNamespace().equals(ServerResetHardcore.MOD_ID)) return false;
+        String path = key.identifier().getPath();
+        if (!path.startsWith("reset_")) return false;
+        return !path.endsWith("_end");
+    }
+
     static CompletableFuture<Vec3> findSpawn(ServerLevel world) {
         return PlayerSpawnFinder.findSpawn(world, world.getRespawnData().pos());
     }
