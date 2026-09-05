@@ -78,7 +78,6 @@ public final class HardcoreConfig {
 
     private void sanitize() {
         allowedDeaths = 1;
-        requireConsoleConfirmation = false;
         resetDelaySeconds = Math.max(0, resetDelaySeconds);
         resetCount = Math.max(0, resetCount);
         deathsSinceLastReset = 0;

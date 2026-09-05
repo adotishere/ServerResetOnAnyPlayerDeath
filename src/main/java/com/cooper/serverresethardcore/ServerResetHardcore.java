@@ -14,6 +14,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
@@ -44,6 +46,7 @@ public final class ServerResetHardcore implements ModInitializer {
     private static boolean resetInProgress;
     private static boolean pendingConsoleConfirmation;
     private static long confirmationPromptAtTick = Long.MAX_VALUE;
+    private static long rotateAtTick = Long.MAX_VALUE;
     private static long cleanupAtTick = Long.MAX_VALUE;
     private static int cleanupWorldNumber = -1;
     private static int pendingPostResetWorldNumber = -1;
@@ -55,6 +58,10 @@ public final class ServerResetHardcore implements ModInitializer {
     private static Component triggeringDeathMessage;
     private static final Set<Long> USED_SEEDS = ConcurrentHashMap.newKeySet();
 
+    public static boolean isResetInProgress() {
+        return resetInProgress;
+    }
+
     @Override
     public void onInitialize() {
         preparePersistentDatapacks();
@@ -65,6 +72,7 @@ public final class ServerResetHardcore implements ModInitializer {
             resetInProgress = false;
             pendingConsoleConfirmation = false;
             confirmationPromptAtTick = Long.MAX_VALUE;
+            rotateAtTick = Long.MAX_VALUE;
             cleanupAtTick = Long.MAX_VALUE;
             cleanupWorldNumber = -1;
             pendingPostResetWorldNumber = -1;
@@ -93,31 +101,39 @@ public final class ServerResetHardcore implements ModInitializer {
         LOGGER.info("Server Reset Hardcore v2 loaded");
     }
 
-    /** Returns true when vanilla death handling must be cancelled. */
-    public static boolean onPlayerDeath(ServerPlayer player, Component vanillaDeathMessage) {
+    public static void onPlayerDeath(ServerPlayer player, Component vanillaDeathMessage) {
         if (resetInProgress) {
-            revive(player);
-            return true;
+            return;
         }
 
         resetInProgress = true;
         triggeringDeathMessage = vanillaDeathMessage.copy();
-        revive(player);
         MinecraftServer server = player.level().getServer();
         server.getPlayerList().broadcastSystemMessage(
                 Component.literal("\"").append(triggeringDeathMessage.copy()).append("\""), false);
         config.deathsSinceLastReset = 0;
         config.save(CONFIG_PATH, LOGGER);
 
-        // Always instantly transfer players to the new overworld dimension on any player death
-        activateStandbyWorld(server);
-        return true;
+        killAllOtherPlayers(server, player);
+
+        if (config.requireConsoleConfirmation) {
+            pendingConsoleConfirmation = true;
+            confirmationPromptAtTick = server.getTickCount() + 1L;
+            rotateAtTick = Long.MAX_VALUE;
+        } else {
+            beginRotation(server);
+        }
     }
 
-    private static void revive(ServerPlayer player) {
-        player.setHealth(player.getMaxHealth());
-        player.setAbsorptionAmount(0.0F);
-        player.clearFire();
+    private static void killAllOtherPlayers(MinecraftServer server, ServerPlayer triggerPlayer) {
+        for (ServerPlayer other : new ArrayList<>(server.getPlayerList().getPlayers())) {
+            if (other != triggerPlayer && !other.isDeadOrDying()) {
+                if (other.isSpectator()) {
+                    other.setGameMode(GameType.SURVIVAL);
+                }
+                other.kill(other.level());
+            }
+        }
     }
 
     private static void registerConfirmationCommand(CommandDispatcher<CommandSourceStack> dispatcher, String name, boolean approve) {
@@ -138,6 +154,7 @@ public final class ServerResetHardcore implements ModInitializer {
                 pendingConsoleConfirmation = false;
                 confirmationPromptAtTick = Long.MAX_VALUE;
                 resetInProgress = false;
+                rotateAtTick = Long.MAX_VALUE;
                 triggeringDeathMessage = null;
                 source.sendSuccess(() -> Component.literal("World reset cancelled."), false);
             }
@@ -155,7 +172,13 @@ public final class ServerResetHardcore implements ModInitializer {
     private static void beginRotation(MinecraftServer server) {
         pendingConsoleConfirmation = false;
         confirmationPromptAtTick = Long.MAX_VALUE;
-        activateStandbyWorld(server);
+        if (config.resetDelaySeconds > 0) {
+            rotateAtTick = server.getTickCount() + (long) config.resetDelaySeconds * 20L;
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.literal("A fresh world opens in " + config.resetDelaySeconds + " second(s)."), false);
+        } else {
+            rotateAtTick = server.getTickCount();
+        }
     }
 
     private static void tick(MinecraftServer server) {
@@ -181,6 +204,10 @@ public final class ServerResetHardcore implements ModInitializer {
         if (pendingConsoleConfirmation && server.getTickCount() >= confirmationPromptAtTick) {
             confirmationPromptAtTick = Long.MAX_VALUE;
             LOGGER.warn("Reset the world? [Y/n]");
+        }
+        if (resetInProgress && !pendingConsoleConfirmation && server.getTickCount() >= rotateAtTick) {
+            rotateAtTick = Long.MAX_VALUE;
+            activateStandbyWorld(server);
         }
         if (cleanupWorldNumber < 0 || server.getTickCount() < cleanupAtTick) return;
         int oldNumber = cleanupWorldNumber;
@@ -220,30 +247,37 @@ public final class ServerResetHardcore implements ModInitializer {
 
         try {
             for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
-                wipePlayer(player);
-                RotatingWorldManager.teleport(player, newWorld, spawn);
+                ServerPlayer targetPlayer = player;
+                if (player.isDeadOrDying()) {
+                    targetPlayer = server.getPlayerList().respawn(player, false, Entity.RemovalReason.KILLED);
+                    if (targetPlayer.connection != null) {
+                        targetPlayer.connection.player = targetPlayer;
+                        targetPlayer.connection.resetPosition();
+                    }
+                }
+                targetPlayer.setGameMode(GameType.SURVIVAL);
+                wipePlayer(targetPlayer);
+                RotatingWorldManager.teleport(targetPlayer, newWorld, spawn);
             }
             RotatingWorldManager.resetWorldTime(server);
             RotatingWorldManager.clearWeather(server);
-            long newNetherSeed = uniqueSeed(config.nextOverworldSeed);
-            long newEndSeed = uniqueSeed(config.nextOverworldSeed, newNetherSeed);
+            long activeSeed = config.nextOverworldSeed;
             config.resetCount++;
-            config.activeOverworldSeed = config.nextOverworldSeed;
-            config.activeNetherSeed = newNetherSeed;
-            config.activeEndSeed = newEndSeed;
-            config.nextOverworldSeed = uniqueSeed(
-                    config.activeOverworldSeed, config.activeNetherSeed, config.activeEndSeed);
+            config.activeOverworldSeed = activeSeed;
+            config.activeNetherSeed = activeSeed;
+            config.activeEndSeed = activeSeed;
+            config.nextOverworldSeed = uniqueSeed(activeSeed);
             config.save(CONFIG_PATH, LOGGER);
             updateServerPropertiesMotd();
 
             pendingPostResetWorldNumber = newNumber;
-            pendingNetherSeed = newNetherSeed;
-            pendingEndSeed = newEndSeed;
+            pendingNetherSeed = activeSeed;
+            pendingEndSeed = activeSeed;
 
             cleanupWorldNumber = oldNumber;
-            cleanupAtTick = server.getTickCount() + (long) config.resetDelaySeconds * 20L;
-            LOGGER.warn("Players moved instantly to world set #{}; old set retires in {} second(s)",
-                    newNumber, config.resetDelaySeconds);
+            cleanupAtTick = server.getTickCount() + Math.max(100L, (long) config.resetDelaySeconds * 20L);
+            LOGGER.warn("Players moved to world set #{}; old set retires in {} second(s)",
+                    newNumber, Math.max(5, config.resetDelaySeconds));
             server.getPlayerList().broadcastSystemMessage(Component.literal("The fresh world is ready."), false);
         } catch (Exception e) {
             resetInProgress = false;
@@ -254,6 +288,7 @@ public final class ServerResetHardcore implements ModInitializer {
 
     private static void wipePlayer(ServerPlayer player) {
         player.stopRiding();
+        player.setGameMode(GameType.SURVIVAL);
         player.getInventory().clearContent();
         player.getEnderChestInventory().clearContent();
         player.setExperiencePoints(0);
@@ -272,16 +307,32 @@ public final class ServerResetHardcore implements ModInitializer {
     }
 
     private static void moveJoiningPlayer(ServerPlayer player, MinecraftServer server) {
+        if (resetInProgress) {
+            if (!player.isDeadOrDying()) {
+                if (player.isSpectator()) {
+                    player.setGameMode(GameType.SURVIVAL);
+                }
+                player.kill(player.level());
+            }
+            return;
+        }
         ServerLevel active = server.getLevel(RotatingWorldManager.keyFor(currentWorldNumber()));
-        if (active == null || player.level() == active) return;
-        Vec3 spawn = activeSpawnPos;
-        if (spawn != null) {
-            RotatingWorldManager.teleport(player, active, spawn);
-        } else {
-            RotatingWorldManager.findSpawn(active).thenAccept(s -> server.execute(() -> {
-                activeSpawnPos = s;
-                if (player.connection != null) RotatingWorldManager.teleport(player, active, s);
-            }));
+        if (active == null) return;
+        var dim = player.level().dimension();
+        boolean inCurrentSet = dim.equals(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.OVERWORLD))
+                || dim.equals(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.NETHER))
+                || dim.equals(RotatingWorldManager.keyFor(currentWorldNumber(), RotatingWorldManager.WorldPart.END));
+        if (!inCurrentSet) {
+            wipePlayer(player);
+            Vec3 spawn = activeSpawnPos;
+            if (spawn != null) {
+                RotatingWorldManager.teleport(player, active, spawn);
+            } else {
+                RotatingWorldManager.findSpawn(active).thenAccept(s -> server.execute(() -> {
+                    activeSpawnPos = s;
+                    if (player.connection != null) RotatingWorldManager.teleport(player, active, s);
+                }));
+            }
         }
     }
 
@@ -298,20 +349,16 @@ public final class ServerResetHardcore implements ModInitializer {
         } else {
             USED_SEEDS.add(config.activeOverworldSeed);
         }
-        if (config.activeNetherSeed == 0L || USED_SEEDS.contains(config.activeNetherSeed)) {
-            config.activeNetherSeed = uniqueSeed();
+        if (config.activeNetherSeed != config.activeOverworldSeed) {
+            config.activeNetherSeed = config.activeOverworldSeed;
             changed = true;
-        } else {
-            USED_SEEDS.add(config.activeNetherSeed);
         }
-        if (config.activeEndSeed == 0L || USED_SEEDS.contains(config.activeEndSeed)) {
-            config.activeEndSeed = uniqueSeed();
+        if (config.activeEndSeed != config.activeOverworldSeed) {
+            config.activeEndSeed = config.activeOverworldSeed;
             changed = true;
-        } else {
-            USED_SEEDS.add(config.activeEndSeed);
         }
-        if (config.nextOverworldSeed == 0L || USED_SEEDS.contains(config.nextOverworldSeed)) {
-            config.nextOverworldSeed = uniqueSeed();
+        if (config.nextOverworldSeed == 0L || USED_SEEDS.contains(config.nextOverworldSeed) || config.nextOverworldSeed == config.activeOverworldSeed) {
+            config.nextOverworldSeed = uniqueSeed(config.activeOverworldSeed);
             changed = true;
         } else {
             USED_SEEDS.add(config.nextOverworldSeed);

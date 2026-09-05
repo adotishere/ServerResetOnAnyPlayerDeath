@@ -10,9 +10,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(ServerPlayer.class)
 abstract class ServerPlayerMixin {
-    @Inject(method = "die", at = @At("HEAD"), cancellable = true)
+    @Inject(method = "die", at = @At("HEAD"))
     private void serverResetHardcore$onDeath(DamageSource source, CallbackInfo ci) {
         ServerPlayer player = (ServerPlayer) (Object) this;
-        if (ServerResetHardcore.onPlayerDeath(player, player.getCombatTracker().getDeathMessage())) ci.cancel();
+        ServerResetHardcore.onPlayerDeath(player, player.getCombatTracker().getDeathMessage());
     }
 }
