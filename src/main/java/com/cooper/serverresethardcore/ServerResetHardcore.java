@@ -13,9 +13,16 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.advancements.AdvancementProgress;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.stats.ServerStatsCounter;
+import net.minecraft.stats.Stat;
+import net.minecraft.stats.StatType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.Level;
@@ -33,6 +40,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -64,6 +72,8 @@ public final class ServerResetHardcore implements ModInitializer {
     private static Component triggeringDeathMessage;
     private static final Set<Long> USED_SEEDS = ConcurrentHashMap.newKeySet();
     private static final Set<UUID> PENDING_WIPES = ConcurrentHashMap.newKeySet();
+    // No-kill fork: players held in spectator while a reset is pending, mapped to the game mode they had before being held.
+    private static final Map<UUID, GameType> HELD_PLAYERS = new ConcurrentHashMap<>();
 
     public static void markPendingWipe(UUID uuid) {
         PENDING_WIPES.add(uuid);
@@ -170,7 +180,7 @@ public final class ServerResetHardcore implements ModInitializer {
         config.deathsSinceLastReset = 0;
         config.save(CONFIG_PATH, LOGGER);
 
-        killAllOtherPlayers(server, player);
+        holdAllOtherPlayers(server, player);
 
         if (config.requireConsoleConfirmation) {
             pendingConsoleConfirmation = true;
@@ -181,15 +191,29 @@ public final class ServerResetHardcore implements ModInitializer {
         }
     }
 
-    private static void killAllOtherPlayers(MinecraftServer server, ServerPlayer triggerPlayer) {
+    // No-kill fork: hold survivors in spectator instead of killing them, so no death screen/message/drops/stats are generated for them.
+    private static void holdAllOtherPlayers(MinecraftServer server, ServerPlayer triggerPlayer) {
         for (ServerPlayer other : new ArrayList<>(server.getPlayerList().getPlayers())) {
             if (other != triggerPlayer && !other.isDeadOrDying()) {
-                if (other.isSpectator()) {
-                    other.setGameMode(GameType.SURVIVAL);
-                }
-                other.kill(other.level());
+                holdPlayer(other);
             }
         }
+    }
+
+    private static void holdPlayer(ServerPlayer player) {
+        HELD_PLAYERS.putIfAbsent(player.getUUID(), player.gameMode.getGameModeForPlayer());
+        player.stopRiding();
+        player.setGameMode(GameType.SPECTATOR);
+    }
+
+    private static void releaseHeldPlayers(MinecraftServer server) {
+        for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
+            GameType previous = HELD_PLAYERS.remove(player.getUUID());
+            if (previous != null && !player.isDeadOrDying()) {
+                player.setGameMode(previous == GameType.SPECTATOR ? GameType.SURVIVAL : previous);
+            }
+        }
+        HELD_PLAYERS.clear();
     }
 
     private static void registerConfirmationCommand(CommandDispatcher<CommandSourceStack> dispatcher, String name, boolean approve) {
@@ -212,6 +236,8 @@ public final class ServerResetHardcore implements ModInitializer {
                 resetInProgress = false;
                 rotateAtTick = Long.MAX_VALUE;
                 triggeringDeathMessage = null;
+                // No-kill fork: survivors were only held in spectator, so a cancelled reset can return them unharmed.
+                releaseHeldPlayers(source.getServer());
                 source.sendSuccess(() -> Component.literal("World reset cancelled."), false);
             }
             return Command.SINGLE_SUCCESS;
@@ -278,6 +304,7 @@ public final class ServerResetHardcore implements ModInitializer {
             newWorld = RotatingWorldManager.ensureWorldSet(server, newNumber, config.nextSeed);
         } catch (RuntimeException e) {
             resetInProgress = false;
+            releaseHeldPlayers(server);
             LOGGER.error("Could not open the standby world; the old world was kept", e);
             server.getPlayerList().broadcastSystemMessage(Component.literal("World reset failed; the old world was kept."), false);
             return;
@@ -317,14 +344,9 @@ public final class ServerResetHardcore implements ModInitializer {
         setWorldSpawn(server, newWorld, spawnBlock);
 
         try {
-            for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
-                if (!player.isDeadOrDying()) {
-                    if (player.isSpectator()) {
-                        player.setGameMode(GameType.SURVIVAL);
-                    }
-                    player.kill(player.level());
-                }
-            }
+            // No-kill fork: nobody is killed here. The genuinely dead trigger player is respawned below;
+            // held survivors are wiped and teleported while still alive.
+            HELD_PLAYERS.clear();
 
             resetInProgress = false;
 
@@ -334,12 +356,14 @@ public final class ServerResetHardcore implements ModInitializer {
 
             for (ServerPlayer player : new ArrayList<>(server.getPlayerList().getPlayers())) {
                 ServerPlayer targetPlayer = player;
-                if (player.isDeadOrDying()) {
+                boolean wasDead = player.isDeadOrDying();
+                if (wasDead) {
                     targetPlayer = server.getPlayerList().respawn(player, false, Entity.RemovalReason.KILLED);
                 }
                 targetPlayer.setGameMode(GameType.SURVIVAL);
                 wipePlayer(targetPlayer);
-                if (targetPlayer.level() != newWorld) {
+                // Respawned players land on the new world spawn; alive (held) players are always sent there explicitly.
+                if (!wasDead || targetPlayer.level() != newWorld) {
                     RotatingWorldManager.teleport(targetPlayer, newWorld, activeSpawnPos);
                 }
                 if (targetPlayer.connection != null) {
@@ -392,15 +416,60 @@ public final class ServerResetHardcore implements ModInitializer {
         player.setRespawnPosition(null, false);
         player.getInventory().setChanged();
         player.containerMenu.broadcastChanges();
+        player.resetFallDistance();
+        player.seenCredits = false;
+        player.wonGame = false;
+        resetAdvancements(player);
+        resetRecipes(player);
+        resetStats(player);
+    }
+
+    private static void resetAdvancements(ServerPlayer player) {
+        MinecraftServer server = player.level().getServer();
+        if (server == null) return;
+        PlayerAdvancements advancements = player.getAdvancements();
+        for (AdvancementHolder holder : server.getAdvancements().getAllAdvancements()) {
+            AdvancementProgress progress = advancements.getOrStartProgress(holder);
+            if (!progress.hasProgress()) continue;
+            for (String criterion : toList(progress.getCompletedCriteria())) {
+                advancements.revoke(holder, criterion);
+            }
+        }
+        advancements.flushDirty(player, true);
+        advancements.save();
+    }
+
+    private static List<String> toList(Iterable<String> iterable) {
+        List<String> list = new ArrayList<>();
+        iterable.forEach(list::add);
+        return list;
+    }
+
+    private static void resetRecipes(ServerPlayer player) {
+        MinecraftServer server = player.level().getServer();
+        if (server == null) return;
+        player.resetRecipes(server.getRecipeManager().getRecipes());
+    }
+
+    private static void resetStats(ServerPlayer player) {
+        ServerStatsCounter stats = player.getStats();
+        for (StatType<?> type : BuiltInRegistries.STAT_TYPE) {
+            for (Stat<?> stat : type) {
+                if (stats.getValue(stat) != 0) {
+                    player.resetStat(stat);
+                }
+            }
+        }
+        stats.markAllDirty();
+        stats.save();
+        stats.sendStats(player);
     }
 
     private static void moveJoiningPlayer(ServerPlayer player, MinecraftServer server) {
         if (resetInProgress) {
+            // No-kill fork: players joining mid-reset wait in spectator and are moved with everyone else on activation.
             if (!player.isDeadOrDying()) {
-                if (player.isSpectator()) {
-                    player.setGameMode(GameType.SURVIVAL);
-                }
-                player.kill(player.level());
+                holdPlayer(player);
             }
             return;
         }

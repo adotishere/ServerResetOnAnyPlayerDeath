@@ -23,7 +23,6 @@ import net.minecraft.world.level.biome.TheEndBiomeSource;
 import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.dimension.LevelStem;
-import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.core.BlockPos;
@@ -148,7 +147,10 @@ public final class RotatingWorldManager {
                 server.getWorldData().isDebugWorld(),
                 BiomeManager.obfuscateSeed(seed),
                 ImmutableList.of(),
-                part == WorldPart.OVERWORLD
+                // tickTime must be false: all levels share overworldData(), and the vanilla root
+                // overworld already advances its gameTime once per tick. Letting custom overworlds
+                // tick it too speeds up the client clock (gameTime drives ClientClockManager).
+                false
         );
         accessor.serverResetHardcore$getLevels().put(key, created);
         created.getWorldBorder().setAbsoluteMaxSize(server.getAbsoluteMaxWorldSize());
@@ -222,9 +224,11 @@ public final class RotatingWorldManager {
                 server.getWorldData().overworldData().setGameTime(0L);
             }
             server.registryAccess().lookup(Registries.WORLD_CLOCK).ifPresent(lookup ->
-                lookup.listElements().forEach(clock ->
-                    server.clockManager().setTotalTicks(clock, 0L)
-                )
+                lookup.listElements().forEach(clock -> {
+                    server.clockManager().setTotalTicks(clock, 0L);
+                    server.clockManager().setRate(clock, 1.0F);
+                    server.clockManager().setPaused(clock, false);
+                })
             );
             if (server.getPlayerList() != null) {
                 server.getPlayerList().broadcastAll(server.clockManager().createFullSyncPacket());
